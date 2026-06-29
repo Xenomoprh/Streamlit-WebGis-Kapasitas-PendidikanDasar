@@ -11,6 +11,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 import streamlit.components.v1 as components
 import re
+from difflib import get_close_matches, SequenceMatcher
 
 try:
     from openpyxl import load_workbook
@@ -85,7 +86,7 @@ def get_geojson_name_field(geojson_data):
         return "KECAMATAN"
 
     properties = geojson_data["features"][0].get("properties", {})
-    for key in ["KECAMATAN", "kecamatan", "Kecamatan", "NAMA_KEC", "NAMA", "NAME"]:
+    for key in ["KECAMATAN", "kecamatan", "Kecamatan", "nm_kecamatan", "NM_KECAMATAN", "NAMA_KEC", "NAMA", "NAME"]:
         if key in properties:
             return key
 
@@ -102,6 +103,20 @@ def update_geojson_from_upload(uploaded_geojson):
     st.session_state["geojson_data"] = geojson_obj
     st.session_state["geojson_name"] = uploaded_geojson.name
     return geojson_obj
+
+
+def extract_geojson_names(geojson_data):
+    if not geojson_data or "features" not in geojson_data:
+        return []
+
+    field_name = get_geojson_name_field(geojson_data)
+    names = []
+    for feature in geojson_data.get("features", []):
+        props = feature.get("properties", {})
+        value = props.get(field_name)
+        if value:
+            names.append(str(value).strip())
+    return names
 
 def read_dapodik_file(uploaded_file):
     if uploaded_file.name.endswith(".csv"):
@@ -280,9 +295,43 @@ def read_xlsx_without_openpyxl(uploaded_file):
 
         return pd.DataFrame(normalized_data, columns=headers)
 
-def process_dapodik_data(df):
+def best_name_match(source_name, candidate_names):
+    """Cari kecamatan kandidat terbaik berdasarkan nama sumber."""
+    if not source_name or not candidate_names:
+        return None
+
+    source_norm = normalize_name(source_name)
+    candidate_map = {normalize_name(name): name for name in candidate_names}
+
+    if source_norm in candidate_map:
+        return candidate_map[source_norm]
+
+    close = get_close_matches(source_norm, list(candidate_map.keys()), n=1, cutoff=0.72)
+    if close:
+        return candidate_map[close[0]]
+
+    best_candidate = None
+    best_score = 0.0
+    for candidate_norm, candidate_name in candidate_map.items():
+        score = SequenceMatcher(None, source_norm, candidate_norm).ratio()
+        if score > best_score:
+            best_score = score
+            best_candidate = candidate_name
+
+    return best_candidate if best_score >= 0.72 else None
+
+
+def process_dapodik_data(df, geojson_names=None):
     if "Kecamatan" not in df.columns and "Sumber_File" in df.columns:
-        df["Kecamatan"] = df["Sumber_File"].apply(lambda x: os.path.splitext(str(x))[0].strip())
+        def infer_kecamatan_from_source(source_file):
+            base_name = os.path.splitext(str(source_file))[0].strip()
+            if geojson_names:
+                matched = best_name_match(base_name, geojson_names)
+                if matched:
+                    return matched
+            return base_name
+
+        df["Kecamatan"] = df["Sumber_File"].apply(infer_kecamatan_from_source)
     
     if "Nama Sekolah" in df.columns:
         df = df[~df["Nama Sekolah"].astype(str).str.lower().str.contains("total", na=False)]
@@ -333,6 +382,14 @@ def process_dapodik_data(df):
         3: "Klaster 3 (Sangat Berlebih)",
     }
     df_agg["Nama_Klaster"] = df_agg["Klaster"].map(klaster_label)
+
+    # Samakan nama kecamatan dengan nama kanonik GeoJSON jika tersedia
+    if geojson_names:
+        canonical_names = []
+        for kecamatan in df_agg["Kecamatan"]:
+            matched_name = best_name_match(kecamatan, geojson_names)
+            canonical_names.append(matched_name if matched_name else kecamatan)
+        df_agg["Kecamatan"] = canonical_names
     
     # =========================================================================
     # PROFILING KLASTER: Hitung rata-rata indikator per klaster
@@ -369,31 +426,63 @@ def normalize_name(text):
     """
     if not text:
         return ""
-    # Ubah ke lowercase dan hapus karakter non-alphanumeric
-    normalized = re.sub(r'[^a-z0-9]', '', str(text).lower())
-    return normalized
+    tokens = re.split(r"[^a-z0-9]+", str(text).lower())
+    stopwords = {"kecamatan", "kec", "medan"}
+    cleaned_tokens = [token for token in tokens if token and token not in stopwords]
+    return "".join(cleaned_tokens)
 
 
 def prepare_map_geojson(geojson_data, df_agg, geojson_name_field):
     """Siapkan GeoJSON dengan menggabungkan data klaster menggunakan normalisasi nama."""
     geojson_map = deepcopy(geojson_data)
 
+    cluster_colors = {
+        0: "#d73027",
+        1: "#fc8d59",
+        2: "#91cf60",
+        3: "#1a9850",
+    }
+
     # Buat lookup dictionary dengan kunci (nama kecamatan) yang sudah dinormalisasi
     lookup = {normalize_name(k): v for k, v in df_agg.set_index("Kecamatan").to_dict(orient="index").items()}
+    lookup_keys = list(lookup.keys())
+
+    def resolve_row(kecamatan_raw):
+        kecamatan_clean = normalize_name(kecamatan_raw)
+        if kecamatan_clean in lookup:
+            return lookup[kecamatan_clean], kecamatan_clean, "exact"
+
+        close = get_close_matches(kecamatan_clean, lookup_keys, n=1, cutoff=0.72)
+        if close:
+            return lookup[close[0]], close[0], "fuzzy"
+
+        best_key = None
+        best_score = 0.0
+        for candidate_key in lookup_keys:
+            score = SequenceMatcher(None, kecamatan_clean, candidate_key).ratio()
+            if score > best_score:
+                best_score = score
+                best_key = candidate_key
+
+        if best_key and best_score >= 0.72:
+            return lookup[best_key], best_key, "sequence"
+
+        return None, kecamatan_clean, "missing"
 
     for feature in geojson_map.get("features", []):
         props = feature.setdefault("properties", {})
         kecamatan_raw = props.get(geojson_name_field)
-        kecamatan_clean = normalize_name(kecamatan_raw)
-        
-        # Lakukan pencocokan menggunakan nama yang sudah dinormalisasi
-        row = lookup.get(kecamatan_clean)
+        row, matched_key, match_mode = resolve_row(kecamatan_raw)
+
         if row:
             # Copy semua kolom dari df_agg ke properties GeoJSON
             row_copy = row.copy()
             # Pastikan Klaster adalah integer untuk style_function
             if "Klaster" in row_copy:
                 row_copy["Klaster"] = int(row_copy["Klaster"]) if row_copy["Klaster"] is not None else None
+            row_copy["cluster_color"] = cluster_colors.get(row_copy.get("Klaster"), "#cccccc")
+            row_copy["match_key"] = matched_key
+            row_copy["match_mode"] = match_mode
             props.update(row_copy)
         else:
             # Set default values jika data tidak tersedia
@@ -407,6 +496,9 @@ def prepare_map_geojson(geojson_data, df_agg, geojson_name_field):
             props["Rata_Rata_Sekolah_Per_Kec"] = None
             props["Rata_Rata_PD_Per_Kec"] = None
             props["Rata_Rata_Guru_Per_Kec"] = None
+            props["cluster_color"] = "#cccccc"
+            props["match_key"] = matched_key
+            props["match_mode"] = match_mode
 
     return geojson_map
 
@@ -414,25 +506,13 @@ def prepare_map_geojson(geojson_data, df_agg, geojson_name_field):
 def build_map_html(geojson_data, df_agg, geojson_name_field):
     m = folium.Map(location=[3.5952, 98.6722], zoom_start=11, tiles="CartoDB positron", prefer_canvas=True)
 
-    # Fokus pada 4 klaster utama agar peta ringan dan konsisten dengan hasil kalkulasi
-    cluster_colors = {
-        0: "#d73027",  # sangat kritis
-        1: "#fc8d59",  # kurang memadai
-        2: "#91cf60",  # memadai
-        3: "#1a9850",  # sangat berlebih
-    }
-
     def style_function(feature):
-        klaster = feature["properties"].get("Klaster")
-        # Konversi ke int jika perlu (handle string atau float)
-        try:
-            klaster = int(klaster) if klaster is not None else None
-        except (ValueError, TypeError):
-            klaster = None
-        
-        warna = cluster_colors.get(klaster, "#cccccc")  # Abu-abu default jika klaster None
+        props = feature["properties"]
+        cluster_color = props.get("cluster_color")
+        if cluster_color is None:
+            cluster_color = "#cccccc"
         return {
-            "fillColor": warna,
+            "fillColor": cluster_color,
             "color": "#444444",
             "weight": 1.5,
             "fillOpacity": 0.8,
@@ -448,8 +528,8 @@ def build_map_html(geojson_data, df_agg, geojson_name_field):
     )
 
     popup = folium.GeoJsonPopup(
-        fields=[geojson_name_field, "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Rasio_PD_Sekolah", "Rasio_PD_Guru", "Rata_Rata_Sekolah_Per_Kec", "Rata_Rata_PD_Per_Kec", "Nama_Klaster"],
-        aliases=["Kecamatan", "Jumlah Sekolah", "Jumlah PD", "Jumlah Guru", "Rasio PD/Sekolah", "Rasio PD/Guru", "Rata2 Sekolah/Klaster", "Rata2 PD/Klaster", "Status Klaster"],
+        fields=[geojson_name_field, "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Rasio_PD_Sekolah", "Rasio_PD_Guru", "Rata_Rata_Sekolah_Per_Kec", "Rata_Rata_PD_Per_Kec", "Nama_Klaster", "match_mode"],
+        aliases=["Kecamatan", "Jumlah Sekolah", "Jumlah PD", "Jumlah Guru", "Rasio PD/Sekolah", "Rasio PD/Guru", "Rata2 Sekolah/Klaster", "Rata2 PD/Klaster", "Status Klaster", "Mode Match"],
         localize=True,
         labels=True,
         style="background-color: white; border-radius: 8px; padding: 10px;",
@@ -504,6 +584,25 @@ with TAB_INPUT:
             accept_multiple_files=True,
         )
 
+        geojson_for_mapping = load_geojson_data()
+        geojson_names_for_mapping = extract_geojson_names(geojson_for_mapping)
+
+        if uploaded_files and geojson_names_for_mapping:
+            with st.expander("Pemetaan file ke kecamatan", expanded=True):
+                st.caption("Pilih kecamatan untuk setiap file jika nama file tidak memuat nama kecamatan secara jelas.")
+                file_kecamatan_map = {}
+                for file in uploaded_files:
+                    default_value = best_name_match(file.name, geojson_names_for_mapping) or geojson_names_for_mapping[0]
+                    selected_kecamatan = st.selectbox(
+                        f"{file.name}",
+                        options=geojson_names_for_mapping,
+                        index=geojson_names_for_mapping.index(default_value) if default_value in geojson_names_for_mapping else 0,
+                        key=f"map_{file.name}",
+                    )
+                    file_kecamatan_map[file.name] = selected_kecamatan
+
+                st.session_state["file_kecamatan_map"] = file_kecamatan_map
+
         if uploaded_files:
             st.caption("File yang dipilih akan disimpan dulu. Proses klasterisasi hanya berjalan saat tombol dipencet.")
             st.write("File aktif:")
@@ -516,6 +615,13 @@ with TAB_INPUT:
                     for file in uploaded_files:
                         df_temp = read_dapodik_file(file)
                         df_temp["Sumber_File"] = file.name
+
+                        # Pakai mapping manual file -> kecamatan jika tersedia.
+                        # Jika kolom Kecamatan ada, kita tetap biarkan nilainya.
+                        selected_kecamatan = st.session_state.get("file_kecamatan_map", {}).get(file.name)
+                        if selected_kecamatan:
+                            df_temp["Kecamatan"] = selected_kecamatan
+
                         df_list.append(df_temp)
                         file_names.append(file.name)
 
@@ -567,7 +673,12 @@ with TAB_INPUT:
         if st.button("Proses Data Dapodik", type="primary", disabled=st.session_state["raw_df"] is None):
             try:
                 with st.spinner("Memproses data dan menjalankan algoritma K-Means++..."):
-                    processed_df = process_dapodik_data(st.session_state["raw_df"])
+                    geojson_for_matching = load_geojson_data()
+                    geojson_names = []
+                    if geojson_for_matching and "features" in geojson_for_matching:
+                        geojson_names = extract_geojson_names(geojson_for_matching)
+
+                    processed_df = process_dapodik_data(st.session_state["raw_df"], geojson_names=geojson_names)
                     st.session_state["processed_df"] = processed_df
 
                 st.success("✅ Data berhasil diproses.")
@@ -624,6 +735,15 @@ with TAB_PREVIEW:
             geojson_name_field = get_geojson_name_field(geojson_data)
             map_geojson = prepare_map_geojson(geojson_data, processed_df, geojson_name_field)
 
+            matched = 0
+            missing = 0
+            for feature in map_geojson.get("features", []):
+                props = feature.get("properties", {})
+                if props.get("cluster_color") == "#cccccc" or props.get("Nama_Klaster") == "Data tidak tersedia":
+                    missing += 1
+                else:
+                    matched += 1
+
             # Ringkasan dashboard agar tampilan selaras dengan hasil kalkulasi
             total_kec = processed_df["Kecamatan"].nunique()
             total_sekolah = int(processed_df["Jumlah_Sekolah"].sum())
@@ -635,6 +755,7 @@ with TAB_PREVIEW:
             m2.metric("Sekolah", total_sekolah)
             m3.metric("Peserta Didik", f"{total_pd:,}".replace(",", "."))
             m4.metric("Guru", f"{total_guru:,}".replace(",", "."))
+            st.caption(f"Match GeoJSON ke data klaster: {matched} cocok, {missing} belum cocok")
 
             left, right = st.columns([2, 1])
             with left:
