@@ -9,6 +9,7 @@ import os
 from copy import deepcopy
 import zipfile
 import xml.etree.ElementTree as ET
+import streamlit.components.v1 as components
 
 try:
     from openpyxl import load_workbook
@@ -32,10 +33,38 @@ if "processed_df" not in st.session_state:
     st.session_state["processed_df"] = None
 if "raw_df" not in st.session_state:
     st.session_state["raw_df"] = None
+if "raw_file_names" not in st.session_state:
+    st.session_state["raw_file_names"] = []
 if "geojson_data" not in st.session_state:
     st.session_state["geojson_data"] = None
 if "geojson_name" not in st.session_state:
     st.session_state["geojson_name"] = None
+
+
+st.markdown(
+    """
+    <style>
+    .section-card {
+        background: linear-gradient(135deg, rgba(13,110,253,0.08), rgba(25,135,84,0.08));
+        border: 1px solid rgba(0,0,0,0.06);
+        border-radius: 16px;
+        padding: 16px 18px;
+        margin-bottom: 12px;
+    }
+    .small-note {
+        color: #6c757d;
+        font-size: 0.92rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+@st.cache_data(show_spinner=False)
+def load_geojson_from_disk(path, mtime):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def load_geojson_data():
@@ -44,8 +73,8 @@ def load_geojson_data():
             return st.session_state["geojson_data"]
 
     if os.path.exists(GEOJSON_PATH):
-        with open(GEOJSON_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+        mtime = os.path.getmtime(GEOJSON_PATH)
+        return load_geojson_from_disk(GEOJSON_PATH, mtime)
 
     return None
 
@@ -130,16 +159,16 @@ def normalize_dapodik_columns(df):
 
     # Bersihkan nama kolom supaya konsisten
     df.columns = [str(col).replace("\ufeff", "").strip() for col in df.columns]
+    
+    # =====================================================================
+    # PERBAIKAN: HAPUS KOLOM DUPLIKAT YANG MEMBUAT PANDAS CRASH
+    # Mengabaikan kolom-kolom ganda/tersembunyi bawaan excel Dapodik
+    # =====================================================================
+    df = df.loc[:, ~df.columns.duplicated()]
+    
     return df
 
-
 def read_xlsx_without_openpyxl(uploaded_file):
-    """Read the first sheet of an .xlsx file without loading workbook styles.
-
-    This is a fallback for damaged Excel files whose style definitions break
-    openpyxl/pandas parsing. It extracts only cell values from XML.
-    """
-
     ns_main = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
     ns_rel = "{http://schemas.openxmlformats.org/package/2006/relationships}"
     ns_doc_rel = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
@@ -223,7 +252,7 @@ def read_xlsx_without_openpyxl(uploaded_file):
         if not rows:
             return pd.DataFrame()
 
-        expected_keywords = ["kecamatan", "nama sekolah", "pd", "guru"]
+        expected_keywords = ["npsn", "nama sekolah", "pd", "guru"]
 
         def row_score(row):
             values = [str(x).strip().lower() for x in row if x not in (None, "")]
@@ -264,6 +293,22 @@ def read_xlsx_without_openpyxl(uploaded_file):
         return pd.DataFrame(normalized_data, columns=headers)
 
 def process_dapodik_data(df):
+    # =========================================================================
+    # PERBAIKAN 1: Ekstrak Kecamatan dari Nama File jika tidak ada di Excel
+    # =========================================================================
+    if "Kecamatan" not in df.columns and "Sumber_File" in df.columns:
+        # Menghapus ekstensi file (misal: "Kec. Medan Barat.xlsx" menjadi "Kec. Medan Barat")
+        df["Kecamatan"] = df["Sumber_File"].apply(lambda x: os.path.splitext(str(x))[0].strip())
+    
+    # =========================================================================
+    # PERBAIKAN 2: Hapus baris 'Total' yang sering ikut terdownload di Dapodik
+    # =========================================================================
+    if "Nama Sekolah" in df.columns:
+        df = df[~df["Nama Sekolah"].astype(str).str.lower().str.contains("total", na=False)]
+    if "NPSN" in df.columns:
+        df = df[df["NPSN"].notna()] # Menghapus baris jika kolom NPSN kosong
+        
+    # Pastikan kolom wajib terpenuhi
     required_columns = ["Kecamatan", "PD", "Guru"]
     missing_columns = [col for col in required_columns if col not in df.columns]
     if missing_columns:
@@ -322,8 +367,82 @@ def prepare_map_geojson(geojson_data, df_agg, geojson_name_field):
     return geojson_map
 
 
+def build_map_html(geojson_data, df_agg, geojson_name_field):
+    m = folium.Map(location=[3.5952, 98.6722], zoom_start=11, tiles="CartoDB positron", prefer_canvas=True)
+
+    # Fokus pada 4 klaster utama agar peta ringan dan konsisten dengan hasil kalkulasi
+    cluster_colors = {
+        0: "#d73027",  # sangat kritis
+        1: "#fc8d59",  # kurang memadai
+        2: "#91cf60",  # memadai
+        3: "#1a9850",  # sangat berlebih
+    }
+
+    def style_function(feature):
+        klaster = feature["properties"].get("Klaster")
+        return {
+            "fillColor": cluster_colors.get(klaster, "#9e9e9e"),
+            "color": "#5a5a5a",
+            "weight": 1,
+            "fillOpacity": 0.75,
+        }
+
+    tooltip = folium.GeoJsonTooltip(
+        fields=[geojson_name_field, "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Nama_Klaster"],
+        aliases=["Kecamatan", "Jumlah Sekolah", "Jumlah PD", "Jumlah Guru", "Status Klaster"],
+        localize=True,
+        sticky=False,
+        labels=True,
+    )
+
+    popup = folium.GeoJsonPopup(
+        fields=[geojson_name_field, "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Nama_Klaster"],
+        aliases=["Kecamatan", "Jumlah Sekolah", "Jumlah PD", "Jumlah Guru", "Status Klaster"],
+        localize=True,
+        labels=True,
+        style="background-color: white;",
+        max_width=320,
+    )
+
+    folium.GeoJson(
+        geojson_data,
+        name="Klaster Kecamatan",
+        style_function=style_function,
+        tooltip=tooltip,
+        popup=popup,
+    ).add_to(m)
+
+    legend_html = """
+    <div style="
+        position: fixed;
+        bottom: 35px;
+        left: 35px;
+        z-index: 9999;
+        background: white;
+        border: 1px solid rgba(0,0,0,0.12);
+        border-radius: 12px;
+        padding: 12px 14px;
+        box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+        font-size: 13px;
+        min-width: 210px;
+    ">
+        <div style="font-weight: 700; margin-bottom: 8px;">Legenda Klaster</div>
+        <div><span style="display:inline-block;width:12px;height:12px;background:#d73027;margin-right:8px;border-radius:3px"></span>Sangat Kritis</div>
+        <div><span style="display:inline-block;width:12px;height:12px;background:#fc8d59;margin-right:8px;border-radius:3px"></span>Kurang Memadai</div>
+        <div><span style="display:inline-block;width:12px;height:12px;background:#91cf60;margin-right:8px;border-radius:3px"></span>Memadai / Aman</div>
+        <div><span style="display:inline-block;width:12px;height:12px;background:#1a9850;margin-right:8px;border-radius:3px"></span>Sangat Berlebih</div>
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(legend_html))
+
+    folium.LayerControl(position="topright").add_to(m)
+    return m.get_root().render()
+
+
 with TAB_INPUT:
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("📥 Upload Data dan GeoJSON")
+    st.caption("Data Dapodik disimpan dulu. Proses klasterisasi hanya dijalankan saat tombol ditekan.")
     col_left, col_right = st.columns(2)
 
     with col_left:
@@ -332,6 +451,31 @@ with TAB_INPUT:
             type=["csv", "xlsx"],
             accept_multiple_files=True,
         )
+
+        if uploaded_files:
+            st.caption("File yang dipilih akan disimpan dulu. Proses klasterisasi hanya berjalan saat tombol dipencet.")
+            st.write("File aktif:")
+            st.write([f.name for f in uploaded_files])
+
+            if st.button("Simpan file Dapodik"):
+                try:
+                    df_list = []
+                    file_names = []
+                    for file in uploaded_files:
+                        df_temp = read_dapodik_file(file)
+                        df_temp["Sumber_File"] = file.name
+                        df_list.append(df_temp)
+                        file_names.append(file.name)
+
+                    raw_df = pd.concat(df_list, ignore_index=True)
+                    st.session_state["raw_df"] = raw_df
+                    st.session_state["raw_file_names"] = file_names
+                    st.session_state["processed_df"] = None
+
+                    st.success(f"✅ {len(uploaded_files)} file berhasil disimpan. Data lama sudah diganti.")
+                    st.info("Silakan klik tombol Proses Data Dapodik untuk menjalankan klasterisasi.")
+                except Exception as e:
+                    st.error(f"⚠️ Terjadi kesalahan saat menyimpan file: {e}")
 
     with col_right:
         uploaded_geojson = st.file_uploader(
@@ -352,6 +496,12 @@ with TAB_INPUT:
     st.info("Upload satu atau beberapa file Dapodik sekaligus. Hasilnya akan digabung, diproses, lalu ditampilkan di tab preview.")
 
     with st.expander("Status file aktif", expanded=True):
+        if st.session_state["raw_file_names"]:
+            st.success(f"File Dapodik tersimpan: {len(st.session_state['raw_file_names'])} file")
+            st.caption(", ".join(st.session_state["raw_file_names"]))
+        else:
+            st.warning("Belum ada file Dapodik yang disimpan.")
+
         if st.session_state["geojson_name"]:
             st.success(f"GeoJSON aktif: {st.session_state['geojson_name']}")
         elif os.path.exists(GEOJSON_PATH):
@@ -359,24 +509,16 @@ with TAB_INPUT:
         else:
             st.warning("GeoJSON belum diupload. Silakan upload file batas kecamatan.")
 
-        if uploaded_files:
+        if st.session_state["raw_df"] is not None:
+            st.success("Data Dapodik sudah tersimpan dan siap diproses.")
+
+        if st.button("Proses Data Dapodik", type="primary", disabled=st.session_state["raw_df"] is None):
             try:
-                df_list = []
-                for file in uploaded_files:
-                    df_temp = read_dapodik_file(file)
-                    df_temp["Sumber_File"] = file.name
-                    df_list.append(df_temp)
-
-                raw_df = pd.concat(df_list, ignore_index=True)
-                st.session_state["raw_df"] = raw_df
-
-                st.success(f"✅ {len(uploaded_files)} file berhasil diunggah dan digabung!")
-                st.caption("Semua file akan diproses menjadi satu tabel gabungan sebelum klasterisasi.")
-
                 with st.spinner("Memproses data dan menjalankan algoritma K-Means++..."):
-                    processed_df = process_dapodik_data(raw_df)
+                    processed_df = process_dapodik_data(st.session_state["raw_df"])
                     st.session_state["processed_df"] = processed_df
 
+                st.success("✅ Data berhasil diproses.")
                 st.subheader("📊 Hasil Klasterisasi per Kecamatan")
                 st.dataframe(
                     processed_df[["Kecamatan", "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Nama_Klaster"]],
@@ -390,15 +532,18 @@ with TAB_INPUT:
                     file_name="hasil_klasterisasi_kecamatan_medan.csv",
                     mime="text/csv",
                 )
-
             except Exception as e:
-                st.error(f"⚠️ Terjadi kesalahan saat membaca atau memproses file: {e}")
-        else:
-            st.info("👈 Silakan upload satu atau beberapa file Data Dapodik (Excel/CSV) untuk memulai analisis.")
+                st.error(f"⚠️ Terjadi kesalahan saat memproses file: {e}")
+
+        if st.session_state["processed_df"] is None:
+            st.info("👈 Upload lalu simpan file Dapodik terlebih dahulu, kemudian tekan tombol Proses Data Dapodik.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 with TAB_PREVIEW:
-    st.subheader("📍 Peta Sebaran Kesenjangan Kapasitas Pendidikan")
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("📍 Dashboard WebGIS")
+    st.caption("Peta ini selaras dengan hasil K-Means++ dan dibuat ringan agar tidak reload berulang saat digeser.")
 
     processed_df = st.session_state.get("processed_df")
     geojson_data = load_geojson_data()
@@ -412,51 +557,59 @@ with TAB_PREVIEW:
             geojson_name_field = get_geojson_name_field(geojson_data)
             map_geojson = prepare_map_geojson(geojson_data, processed_df, geojson_name_field)
 
-            m = folium.Map(location=[3.5952, 98.6722], zoom_start=11, tiles="CartoDB positron")
+            # Ringkasan dashboard agar tampilan selaras dengan hasil kalkulasi
+            total_kec = processed_df["Kecamatan"].nunique()
+            total_sekolah = int(processed_df["Jumlah_Sekolah"].sum())
+            total_pd = int(processed_df["Jumlah_PD"].sum())
+            total_guru = int(processed_df["Jumlah_Guru"].sum())
 
-            def style_function(feature):
-                klaster = feature["properties"].get("Klaster")
-                warna = {
-                    0: "#d73027",
-                    1: "#fc8d59",
-                    2: "#91cf60",
-                    3: "#1a9850",
-                }.get(klaster, "#9e9e9e")
-                return {
-                    "fillColor": warna,
-                    "color": "#444444",
-                    "weight": 1,
-                    "fillOpacity": 0.7,
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Kecamatan", total_kec)
+            m2.metric("Sekolah", total_sekolah)
+            m3.metric("Peserta Didik", f"{total_pd:,}".replace(",", "."))
+            m4.metric("Guru", f"{total_guru:,}".replace(",", "."))
+
+            left, right = st.columns([2, 1])
+            with left:
+                map_html = build_map_html(map_geojson, processed_df, geojson_name_field)
+                components.html(map_html, height=650, scrolling=False)
+
+            with right:
+                st.markdown("### Ringkasan Klaster")
+                cluster_order = [0, 1, 2, 3]
+                cluster_summary = (
+                    processed_df.groupby("Klaster")
+                    .agg(
+                        Kecamatan=("Kecamatan", "count"),
+                        Jumlah_Sekolah=("Jumlah_Sekolah", "sum"),
+                        Jumlah_PD=("Jumlah_PD", "sum"),
+                        Jumlah_Guru=("Jumlah_Guru", "sum"),
+                    )
+                    .reindex(cluster_order)
+                    .fillna(0)
+                    .reset_index()
+                )
+                cluster_names = {
+                    0: "Sangat Kritis",
+                    1: "Kurang Memadai",
+                    2: "Memadai / Aman",
+                    3: "Sangat Berlebih",
                 }
-
-            tooltip = folium.GeoJsonTooltip(
-                fields=["Kecamatan", "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Nama_Klaster"],
-                aliases=["Kecamatan", "Jumlah Sekolah", "Jumlah PD", "Jumlah Guru", "Status Klaster"],
-                localize=True,
-                sticky=False,
-                labels=True,
-            )
-
-            popup = folium.GeoJsonPopup(
-                fields=["Kecamatan", "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Nama_Klaster"],
-                aliases=["Kecamatan", "Jumlah Sekolah", "Jumlah PD", "Jumlah Guru", "Status Klaster"],
-                localize=True,
-                labels=True,
-                style="background-color: white;",
-                max_width=300,
-            )
-
-            folium.GeoJson(
-                map_geojson,
-                name="Klaster Kecamatan",
-                style_function=style_function,
-                tooltip=tooltip,
-                popup=popup,
-            ).add_to(m)
-
-            folium.LayerControl().add_to(m)
-            st_folium(m, width=900, height=500)
+                for _, row in cluster_summary.iterrows():
+                    klaster = int(row["Klaster"])
+                    label = cluster_names.get(klaster, "Tidak Diketahui")
+                    st.markdown(
+                        f"""
+                        <div style="padding:12px 14px;border-radius:12px;border:1px solid rgba(0,0,0,0.08);margin-bottom:10px;">
+                            <div style="font-weight:700;">Klaster {klaster} - {label}</div>
+                            <div style="font-size:13px;color:#666;">{int(row['Kecamatan'])} kecamatan</div>
+                            <div style="font-size:13px;color:#666;">Sekolah: {int(row['Jumlah_Sekolah'])} | PD: {int(row['Jumlah_PD'])} | Guru: {int(row['Jumlah_Guru'])}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
             st.caption(f"GeoJSON field yang dipakai sebagai pengikat wilayah: {geojson_name_field}")
         except Exception as e:
             st.error(f"⚠️ Terjadi kesalahan saat merender peta: {e}")
+    st.markdown('</div>', unsafe_allow_html=True)
