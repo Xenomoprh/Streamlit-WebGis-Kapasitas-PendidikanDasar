@@ -10,6 +10,7 @@ from copy import deepcopy
 import zipfile
 import xml.etree.ElementTree as ET
 import streamlit.components.v1 as components
+import re
 
 try:
     from openpyxl import load_workbook
@@ -129,41 +130,28 @@ def normalize_dapodik_columns(df):
 
     rename_map = {}
 
-    kecamatan_col = infer_column(
-        {"kecamatan", "kec"},
-        ["kecamatan", "kecamatan", "kec ", "kec.", "wilayah", "district"],
-    )
-    sekolah_col = infer_column(
-        {"nama sekolah", "sekolah"},
-        ["nama sekolah", "sekolah", "school"],
-    )
-    pd_col = infer_column(
-        {"pd", "peserta didik", "siswa"},
-        ["pd", "peserta didik", "jumlah siswa", "siswa"],
-    )
-    guru_col = infer_column(
-        {"guru"},
-        ["guru", "pendidik"],
-    )
+    kecamatan_col = infer_column({"kecamatan", "kec"}, ["kecamatan", "kec ", "kec.", "wilayah", "district"])
+    sekolah_col = infer_column({"nama sekolah", "sekolah"}, ["nama sekolah", "sekolah", "school"])
+    pd_col = infer_column({"pd", "peserta didik", "siswa"}, ["pd", "peserta didik", "jumlah siswa", "siswa"])
+    guru_col = infer_column({"guru"}, ["guru", "pendidik"])
+    
+    # Menangkap kolom BP (Bentuk Pendidikan) dan Status
+    bp_col = infer_column({"bp", "bentuk pendidikan"}, ["bp", "bentuk pendidikan"])
+    status_col = infer_column({"status", "status sekolah"}, ["status"])
 
-    if kecamatan_col is not None:
-        rename_map[kecamatan_col] = "Kecamatan"
-    if sekolah_col is not None:
-        rename_map[sekolah_col] = "Nama Sekolah"
-    if pd_col is not None:
-        rename_map[pd_col] = "PD"
-    if guru_col is not None:
-        rename_map[guru_col] = "Guru"
+    if kecamatan_col is not None: rename_map[kecamatan_col] = "Kecamatan"
+    if sekolah_col is not None: rename_map[sekolah_col] = "Nama Sekolah"
+    if pd_col is not None: rename_map[pd_col] = "PD"
+    if guru_col is not None: rename_map[guru_col] = "Guru"
+    if bp_col is not None: rename_map[bp_col] = "BP"
+    if status_col is not None: rename_map[status_col] = "Status"
 
     df = df.rename(columns=rename_map)
 
     # Bersihkan nama kolom supaya konsisten
     df.columns = [str(col).replace("\ufeff", "").strip() for col in df.columns]
     
-    # =====================================================================
-    # PERBAIKAN: HAPUS KOLOM DUPLIKAT YANG MEMBUAT PANDAS CRASH
-    # Mengabaikan kolom-kolom ganda/tersembunyi bawaan excel Dapodik
-    # =====================================================================
+    # HAPUS KOLOM DUPLIKAT YANG MEMBUAT PANDAS CRASH
     df = df.loc[:, ~df.columns.duplicated()]
     
     return df
@@ -252,7 +240,7 @@ def read_xlsx_without_openpyxl(uploaded_file):
         if not rows:
             return pd.DataFrame()
 
-        expected_keywords = ["npsn", "nama sekolah", "pd", "guru"]
+        expected_keywords = ["npsn", "nama sekolah", "pd", "guru", "bp", "status"]
 
         def row_score(row):
             values = [str(x).strip().lower() for x in row if x not in (None, "")]
@@ -293,20 +281,21 @@ def read_xlsx_without_openpyxl(uploaded_file):
         return pd.DataFrame(normalized_data, columns=headers)
 
 def process_dapodik_data(df):
-    # =========================================================================
-    # PERBAIKAN 1: Ekstrak Kecamatan dari Nama File jika tidak ada di Excel
-    # =========================================================================
     if "Kecamatan" not in df.columns and "Sumber_File" in df.columns:
-        # Menghapus ekstensi file (misal: "Kec. Medan Barat.xlsx" menjadi "Kec. Medan Barat")
         df["Kecamatan"] = df["Sumber_File"].apply(lambda x: os.path.splitext(str(x))[0].strip())
     
-    # =========================================================================
-    # PERBAIKAN 2: Hapus baris 'Total' yang sering ikut terdownload di Dapodik
-    # =========================================================================
     if "Nama Sekolah" in df.columns:
         df = df[~df["Nama Sekolah"].astype(str).str.lower().str.contains("total", na=False)]
     if "NPSN" in df.columns:
-        df = df[df["NPSN"].notna()] # Menghapus baris jika kolom NPSN kosong
+        df = df[df["NPSN"].notna()]
+        
+    # =========================================================================
+    # PERBAIKAN FATAL: FILTER HANYA SD & SMP NEGERI
+    # =========================================================================
+    if "BP" in df.columns:
+        df = df[df["BP"].astype(str).str.strip().str.upper().isin(["SD", "SMP"])]
+    if "Status" in df.columns:
+        df = df[df["Status"].astype(str).str.strip().str.upper() == "NEGERI"]
         
     # Pastikan kolom wajib terpenuhi
     required_columns = ["Kecamatan", "PD", "Guru"]
@@ -344,25 +333,80 @@ def process_dapodik_data(df):
         3: "Klaster 3 (Sangat Berlebih)",
     }
     df_agg["Nama_Klaster"] = df_agg["Klaster"].map(klaster_label)
+    
+    # =========================================================================
+    # PROFILING KLASTER: Hitung rata-rata indikator per klaster
+    # =========================================================================
+    df_agg["Rata_Rata_Sekolah_Per_Kec"] = df_agg.groupby("Klaster")["Jumlah_Sekolah"].transform("mean")
+    df_agg["Rata_Rata_PD_Per_Kec"] = df_agg.groupby("Klaster")["Jumlah_PD"].transform("mean")
+    df_agg["Rata_Rata_Guru_Per_Kec"] = df_agg.groupby("Klaster")["Jumlah_Guru"].transform("mean")
+    
     return df_agg
 
 
+def profile_clusters(df_agg):
+    """Hitung profil rata-rata indikator untuk setiap klaster.
+    
+    Returns: DataFrame dengan statistik klaster (mean dan count)
+    """
+    cluster_profile = df_agg.groupby("Klaster").agg(
+        Jumlah_Kecamatan=("Kecamatan", "count"),
+        Rata_Rata_Sekolah=("Jumlah_Sekolah", "mean"),
+        Rata_Rata_PD=("Jumlah_PD", "mean"),
+        Rata_Rata_Guru=("Jumlah_Guru", "mean"),
+        Rata_Rasio_PD_Sekolah=("Rasio_PD_Sekolah", "mean"),
+        Rata_Rasio_PD_Guru=("Rasio_PD_Guru", "mean"),
+    ).reset_index()
+    
+    return cluster_profile
+
+
+def normalize_name(text):
+    """Normalisasi nama kecamatan menggunakan regex untuk pencocokan akurat.
+    
+    Menghapus spasi, tanda baca, kata 'kecamatan', 'kec', 'medan', 
+    dan mengubah menjadi lowercase alphanumeric murni.
+    """
+    if not text:
+        return ""
+    # Ubah ke lowercase dan hapus karakter non-alphanumeric
+    normalized = re.sub(r'[^a-z0-9]', '', str(text).lower())
+    return normalized
+
+
 def prepare_map_geojson(geojson_data, df_agg, geojson_name_field):
+    """Siapkan GeoJSON dengan menggabungkan data klaster menggunakan normalisasi nama."""
     geojson_map = deepcopy(geojson_data)
-    lookup = df_agg.set_index("Kecamatan").to_dict(orient="index")
+
+    # Buat lookup dictionary dengan kunci (nama kecamatan) yang sudah dinormalisasi
+    lookup = {normalize_name(k): v for k, v in df_agg.set_index("Kecamatan").to_dict(orient="index").items()}
 
     for feature in geojson_map.get("features", []):
         props = feature.setdefault("properties", {})
-        kecamatan = props.get(geojson_name_field)
-        row = lookup.get(kecamatan)
+        kecamatan_raw = props.get(geojson_name_field)
+        kecamatan_clean = normalize_name(kecamatan_raw)
+        
+        # Lakukan pencocokan menggunakan nama yang sudah dinormalisasi
+        row = lookup.get(kecamatan_clean)
         if row:
-            props.update(row)
+            # Copy semua kolom dari df_agg ke properties GeoJSON
+            row_copy = row.copy()
+            # Pastikan Klaster adalah integer untuk style_function
+            if "Klaster" in row_copy:
+                row_copy["Klaster"] = int(row_copy["Klaster"]) if row_copy["Klaster"] is not None else None
+            props.update(row_copy)
         else:
+            # Set default values jika data tidak tersedia
             props["Jumlah_Sekolah"] = None
             props["Jumlah_PD"] = None
             props["Jumlah_Guru"] = None
+            props["Rasio_PD_Sekolah"] = None
+            props["Rasio_PD_Guru"] = None
             props["Klaster"] = None
             props["Nama_Klaster"] = "Data tidak tersedia"
+            props["Rata_Rata_Sekolah_Per_Kec"] = None
+            props["Rata_Rata_PD_Per_Kec"] = None
+            props["Rata_Rata_Guru_Per_Kec"] = None
 
     return geojson_map
 
@@ -380,28 +424,36 @@ def build_map_html(geojson_data, df_agg, geojson_name_field):
 
     def style_function(feature):
         klaster = feature["properties"].get("Klaster")
+        # Konversi ke int jika perlu (handle string atau float)
+        try:
+            klaster = int(klaster) if klaster is not None else None
+        except (ValueError, TypeError):
+            klaster = None
+        
+        warna = cluster_colors.get(klaster, "#cccccc")  # Abu-abu default jika klaster None
         return {
-            "fillColor": cluster_colors.get(klaster, "#9e9e9e"),
-            "color": "#5a5a5a",
-            "weight": 1,
-            "fillOpacity": 0.75,
+            "fillColor": warna,
+            "color": "#444444",
+            "weight": 1.5,
+            "fillOpacity": 0.8,
         }
 
+    # Format tooltip dan popup tanpa menampilkan NaN
     tooltip = folium.GeoJsonTooltip(
-        fields=[geojson_name_field, "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Nama_Klaster"],
-        aliases=["Kecamatan", "Jumlah Sekolah", "Jumlah PD", "Jumlah Guru", "Status Klaster"],
+        fields=[geojson_name_field, "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Rasio_PD_Sekolah", "Rasio_PD_Guru", "Rata_Rata_Sekolah_Per_Kec", "Rata_Rata_PD_Per_Kec", "Nama_Klaster"],
+        aliases=["Kecamatan", "Jumlah Sekolah", "Jumlah PD", "Jumlah Guru", "Rasio PD/Sekolah", "Rasio PD/Guru", "Rata2 Sekolah/Klaster", "Rata2 PD/Klaster", "Status Klaster"],
         localize=True,
         sticky=False,
         labels=True,
     )
 
     popup = folium.GeoJsonPopup(
-        fields=[geojson_name_field, "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Nama_Klaster"],
-        aliases=["Kecamatan", "Jumlah Sekolah", "Jumlah PD", "Jumlah Guru", "Status Klaster"],
+        fields=[geojson_name_field, "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Rasio_PD_Sekolah", "Rasio_PD_Guru", "Rata_Rata_Sekolah_Per_Kec", "Rata_Rata_PD_Per_Kec", "Nama_Klaster"],
+        aliases=["Kecamatan", "Jumlah Sekolah", "Jumlah PD", "Jumlah Guru", "Rasio PD/Sekolah", "Rasio PD/Guru", "Rata2 Sekolah/Klaster", "Rata2 PD/Klaster", "Status Klaster"],
         localize=True,
         labels=True,
-        style="background-color: white;",
-        max_width=320,
+        style="background-color: white; border-radius: 8px; padding: 10px;",
+        max_width=360,
     )
 
     folium.GeoJson(
@@ -519,9 +571,24 @@ with TAB_INPUT:
                     st.session_state["processed_df"] = processed_df
 
                 st.success("✅ Data berhasil diproses.")
+                
+                # Tampilkan tabel ringkasan klaster (profil rata-rata)
+                st.subheader("📈 Profil Rata-rata Indikator per Klaster")
+                cluster_profile = profile_clusters(processed_df)
+                cluster_names_dict = {
+                    0: "Sangat Kritis",
+                    1: "Kurang Memadai",
+                    2: "Memadai / Aman",
+                    3: "Sangat Berlebih",
+                }
+                cluster_profile["Nama_Klaster"] = cluster_profile["Klaster"].map(cluster_names_dict)
+                display_profile = cluster_profile[["Klaster", "Nama_Klaster", "Jumlah_Kecamatan", "Rata_Rata_Sekolah", "Rata_Rata_PD", "Rata_Rata_Guru", "Rata_Rasio_PD_Sekolah", "Rata_Rasio_PD_Guru"]].copy()
+                display_profile.columns = ["Klaster", "Nama Klaster", "Jml Kecamatan", "Rata2 Sekolah", "Rata2 PD", "Rata2 Guru", "Rata2 Rasio PD/Sekolah", "Rata2 Rasio PD/Guru"]
+                st.dataframe(display_profile, use_container_width=True)
+                
                 st.subheader("📊 Hasil Klasterisasi per Kecamatan")
                 st.dataframe(
-                    processed_df[["Kecamatan", "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Nama_Klaster"]],
+                    processed_df[["Kecamatan", "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Rasio_PD_Sekolah", "Rasio_PD_Guru", "Nama_Klaster"]],
                     use_container_width=True,
                 )
 
@@ -575,35 +642,34 @@ with TAB_PREVIEW:
                 components.html(map_html, height=650, scrolling=False)
 
             with right:
-                st.markdown("### Ringkasan Klaster")
-                cluster_order = [0, 1, 2, 3]
-                cluster_summary = (
-                    processed_df.groupby("Klaster")
-                    .agg(
-                        Kecamatan=("Kecamatan", "count"),
-                        Jumlah_Sekolah=("Jumlah_Sekolah", "sum"),
-                        Jumlah_PD=("Jumlah_PD", "sum"),
-                        Jumlah_Guru=("Jumlah_Guru", "sum"),
-                    )
-                    .reindex(cluster_order)
-                    .fillna(0)
-                    .reset_index()
-                )
+                st.markdown("### Profil Klaster (Rata-rata Indikator)")
+                cluster_profile = profile_clusters(processed_df)
                 cluster_names = {
                     0: "Sangat Kritis",
                     1: "Kurang Memadai",
                     2: "Memadai / Aman",
                     3: "Sangat Berlebih",
                 }
-                for _, row in cluster_summary.iterrows():
+                
+                for _, row in cluster_profile.iterrows():
                     klaster = int(row["Klaster"])
                     label = cluster_names.get(klaster, "Tidak Diketahui")
+                    n_kec = int(row["Jumlah_Kecamatan"])
+                    avg_sekolah = f"{row['Rata_Rata_Sekolah']:.1f}"
+                    avg_pd = f"{row['Rata_Rata_PD']:.0f}"
+                    avg_guru = f"{row['Rata_Rata_Guru']:.0f}"
+                    avg_rasio_pd_sekolah = f"{row['Rata_Rasio_PD_Sekolah']:.1f}"
+                    avg_rasio_pd_guru = f"{row['Rata_Rasio_PD_Guru']:.1f}"
+                    
                     st.markdown(
                         f"""
-                        <div style="padding:12px 14px;border-radius:12px;border:1px solid rgba(0,0,0,0.08);margin-bottom:10px;">
-                            <div style="font-weight:700;">Klaster {klaster} - {label}</div>
-                            <div style="font-size:13px;color:#666;">{int(row['Kecamatan'])} kecamatan</div>
-                            <div style="font-size:13px;color:#666;">Sekolah: {int(row['Jumlah_Sekolah'])} | PD: {int(row['Jumlah_PD'])} | Guru: {int(row['Jumlah_Guru'])}</div>
+                        <div style="padding:14px;border-radius:12px;border:2px solid rgba(0,0,0,0.1);margin-bottom:12px;background:rgba(245,245,245,0.5);">
+                            <div style="font-weight:700;margin-bottom:6px;font-size:14px;">Klaster {klaster} - {label}</div>
+                            <div style="font-size:12px;color:#555;line-height:1.6;">
+                                <b>Kecamatan:</b> {n_kec} | <b>Rata-rata Sekolah:</b> {avg_sekolah}<br/>
+                                <b>Rata-rata PD:</b> {avg_pd} | <b>Rata-rata Guru:</b> {avg_guru}<br/>
+                                <b>Rasio PD/Sekolah:</b> {avg_rasio_pd_sekolah} | <b>Rasio PD/Guru:</b> {avg_rasio_pd_guru}
+                            </div>
                         </div>
                         """,
                         unsafe_allow_html=True,
