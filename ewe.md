@@ -23,25 +23,283 @@ except Exception:
 # ==========================================
 st.set_page_config(page_title="WebGIS Pendidikan Medan", layout="wide")
 
-st.title("Pemetaan Kesenjangan Kapasitas Pendidikan Dasar Negeri Kota Medan")
-st.caption(
-    "Aplikasi memproses data Dapodik, mengekstrak sekolah SD dan SMP negeri, lalu menampilkan hasil klaster K-Means++ ke dalam WebGIS yang terhubung ke GeoJSON kecamatan."
+st.markdown(
+    """
+    <style>
+    :root {
+        --bg: #070b16;
+        --panel: #0f172a;
+        --panel-2: #111827;
+        --panel-3: #1f2937;
+        --border: rgba(255,255,255,0.08);
+        --text: #e5e7eb;
+        --muted: #9ca3af;
+        --accent: #5b4bff;
+        --accent-2: #7c3aed;
+        --success: #22c55e;
+    }
+
+    .stApp {
+        background: radial-gradient(circle at top right, rgba(91,75,255,0.14), transparent 25%),
+                    linear-gradient(180deg, #060913 0%, #0b1020 55%, #050814 100%);
+        color: var(--text);
+    }
+
+    header[data-testid="stHeader"],
+    div[data-testid="stToolbar"],
+    #MainMenu,
+    footer {
+        visibility: hidden;
+        height: 0;
+    }
+
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0a0f1f 0%, #0d1428 100%);
+        border-right: 1px solid rgba(255,255,255,0.06);
+    }
+    section[data-testid="stSidebar"] * {
+        color: var(--text);
+    }
+    .sidebar-brand {
+        padding: 18px 16px;
+        border-radius: 16px;
+        background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03));
+        border: 1px solid rgba(255,255,255,0.08);
+        margin-bottom: 14px;
+    }
+    .sidebar-brand h1 {
+        margin: 0;
+        font-size: 1.05rem;
+        line-height: 1.3;
+    }
+    .sidebar-brand p {
+        margin: 6px 0 0 0;
+        font-size: 0.82rem;
+        color: rgba(229,231,235,0.78);
+    }
+    .sidebar-chip {
+        display: inline-block;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: rgba(91,75,255,0.16);
+        border: 1px solid rgba(91,75,255,0.35);
+        color: #c7d2fe;
+        font-size: 0.74rem;
+        margin-top: 10px;
+    }
+    .nav-help {
+        font-size: 0.82rem;
+        color: rgba(229,231,235,0.72);
+        margin-top: 4px;
+        line-height: 1.5;
+    }
+    .stRadio > div {
+        gap: 0.2rem;
+    }
+    .stRadio label {
+        padding: 0.85rem 0.95rem !important;
+        border-radius: 14px;
+        background: rgba(255,255,255,0.03);
+        border: 1px solid rgba(255,255,255,0.05);
+        margin-bottom: 8px;
+        transition: all 0.2s ease;
+    }
+    .stRadio label:hover {
+        background: rgba(91,75,255,0.16);
+        border-color: rgba(91,75,255,0.35);
+    }
+    .stRadio [role="radiogroup"] > label[data-checked="true"] {
+        background: linear-gradient(135deg, rgba(91,75,255,0.95), rgba(124,58,237,0.92));
+        border-color: rgba(255,255,255,0.14);
+        box-shadow: 0 16px 30px rgba(91,75,255,0.22);
+    }
+    .stRadio [role="radiogroup"] > label[data-checked="true"] p,
+    .stRadio [role="radiogroup"] > label[data-checked="true"] span {
+        color: #fff !important;
+    }
+    .hero-card {
+        background: linear-gradient(135deg, #0c1220 0%, #111827 45%, #12172a 100%);
+        border-radius: 22px;
+        padding: 24px 26px;
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.08);
+        box-shadow: 0 20px 50px rgba(0,0,0,0.28);
+        margin-bottom: 18px;
+    }
+    .hero-card h2 {
+        margin: 0 0 8px 0;
+        font-size: 1.6rem;
+    }
+    .hero-card p {
+        margin: 0;
+        color: rgba(255,255,255,0.8);
+        line-height: 1.6;
+    }
+    .section-card {
+        background: linear-gradient(180deg, rgba(15,23,42,0.96), rgba(10,15,30,0.96));
+        border: 1px solid rgba(255,255,255,0.07);
+        border-radius: 18px;
+        padding: 18px 20px;
+        margin-bottom: 14px;
+        box-shadow: 0 16px 40px rgba(0,0,0,0.22);
+        color: var(--text);
+    }
+    .section-card h1, .section-card h2, .section-card h3, .section-card h4,
+    .section-card p, .section-card span, .section-card label {
+        color: var(--text);
+    }
+    .panel-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        margin: 0 0 8px 0;
+        letter-spacing: 0.2px;
+    }
+    .panel-subtitle {
+        margin: 0 0 14px 0;
+        color: var(--muted);
+        font-size: 0.92rem;
+    }
+    div[data-testid="stMetric"] {
+        background: linear-gradient(180deg, rgba(15,23,42,0.96), rgba(17,24,39,0.96));
+        border: 1px solid rgba(255,255,255,0.07);
+        padding: 16px 18px;
+        border-radius: 16px;
+        box-shadow: 0 12px 28px rgba(0,0,0,0.16);
+    }
+    div[data-testid="stMetric"] label,
+    div[data-testid="stMetric"] div {
+        color: var(--text) !important;
+    }
+    .stButton > button,
+    .stDownloadButton > button {
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        color: white;
+        border: 0;
+        border-radius: 14px;
+        padding: 0.72rem 1rem;
+        font-weight: 700;
+        box-shadow: 0 12px 25px rgba(91,75,255,0.22);
+    }
+    .stButton > button:hover,
+    .stDownloadButton > button:hover {
+        filter: brightness(1.05);
+        transform: translateY(-1px);
+    }
+    .stFileUploader {
+        background: rgba(255,255,255,0.02);
+        border-radius: 14px;
+        border: 1px solid rgba(255,255,255,0.06);
+        padding: 8px;
+    }
+    .stAlert {
+        border-radius: 14px;
+    }
+    .stDataFrame {
+        border-radius: 14px;
+        overflow: hidden;
+    }
+    .content-shell {
+        max-width: 1420px;
+        margin: 0 auto;
+    }
+    .topbar {
+        background: linear-gradient(180deg, rgba(15,23,42,0.96), rgba(9,14,28,0.96));
+        border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 20px;
+        padding: 18px 22px;
+        box-shadow: 0 18px 40px rgba(0,0,0,0.24);
+        margin-bottom: 18px;
+        color: var(--text);
+    }
+    .topbar-title {
+        font-size: 1.45rem;
+        font-weight: 800;
+        margin: 0;
+    }
+    .topbar-subtitle {
+        margin: 8px 0 0 0;
+        color: var(--muted);
+        font-size: 0.94rem;
+        line-height: 1.5;
+    }
+    .stat-strip {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+    }
+    .stat-pill {
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.07);
+        color: var(--text);
+        font-size: 0.84rem;
+    }
+    .preview-card {
+        background: linear-gradient(180deg, rgba(15,23,42,0.96), rgba(9,14,28,0.96));
+        border: 1px solid rgba(255,255,255,0.07);
+        border-radius: 18px;
+        padding: 16px 18px;
+        box-shadow: 0 16px 40px rgba(0,0,0,0.18);
+    }
+    .preview-card h3 {
+        margin: 0 0 8px 0;
+        font-size: 1rem;
+    }
+    .preview-card p {
+        color: var(--muted);
+        margin: 0;
+        font-size: 0.9rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-st.sidebar.title("WebGIS Pendidikan Medan")
-st.sidebar.caption("Dashboard klasterisasi kapasitas SD & SMP negeri")
-st.sidebar.divider()
+st.sidebar.markdown(
+    """
+    <div class="sidebar-brand">
+        <h1>WebGIS Pendidikan Medan</h1>
+        <p>Dashboard klasterisasi kapasitas SD & SMP negeri</p>
+        <div class="sidebar-chip">Dark dashboard mode</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 nav_choice = st.sidebar.radio(
     "Navigasi",
-    ["Ekstrak data sekolah SD dan SMP negeri", "Menampilkan WebGIS"],
+    ["ekstrak data sekolah sd dan smp negeri", "menampilkan webgisnya"],
     index=0,
 )
 
-st.sidebar.caption("Gunakan menu untuk berpindah antara ekstraksi data bersih dan tampilan peta hasil klaster.")
+st.sidebar.markdown(
+    """
+    <div class="nav-help">
+    Gunakan menu untuk berpindah antara ekstraksi data bersih dan tampilan peta hasil klaster.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-st.divider()
-st.write("21 kecamatan • K-Means++ • GeoJSON linked • SD & SMP negeri")
+st.markdown(
+    """
+    <div class="content-shell">
+    <div class="topbar">
+        <div class="topbar-title">Pemetaan Kesenjangan Kapasitas Pendidikan Dasar Negeri Kota Medan</div>
+        <div class="topbar-subtitle">Aplikasi memproses data Dapodik, mengekstrak sekolah SD dan SMP negeri, lalu menampilkan hasil klaster K-Means++ ke dalam WebGIS yang terhubung ke GeoJSON kecamatan.</div>
+        <div class="stat-strip">
+            <div class="stat-pill">21 kecamatan</div>
+            <div class="stat-pill">K-Means++</div>
+            <div class="stat-pill">GeoJSON linked</div>
+            <div class="stat-pill">SD & SMP negeri</div>
+        </div>
+    </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 GEOJSON_PATH = "medan_kecamatan.geojson"
 
@@ -175,11 +433,6 @@ def normalize_dapodik_columns(df):
     sekolah_col = infer_column({"nama sekolah", "sekolah"}, ["nama sekolah", "sekolah", "school"])
     pd_col = infer_column({"pd", "peserta didik", "siswa"}, ["pd", "peserta didik", "jumlah siswa", "siswa"])
     guru_col = infer_column({"guru"}, ["guru", "pendidik"])
-    pegawai_col = infer_column({"pegawai"}, ["pegawai", "tenaga kependidikan", "tendik"])
-    rombel_col = infer_column({"rombel"}, ["rombel", "jumlah rombel"])
-    rkelas_col = infer_column({"r.kelas", "r kelas"}, ["r.kelas", "r kelas", "ruang kelas", "kelas"])
-    rlab_col = infer_column({"r.lab", "r lab"}, ["r.lab", "r lab", "laboratorium", "lab"])
-    rperpus_col = infer_column({"r.perpus", "r perpus"}, ["r.perpus", "r perpus", "perpus", "perpustakaan"])
     
     # Menangkap kolom BP (Bentuk Pendidikan) dan Status
     bp_col = infer_column({"bp", "bentuk pendidikan"}, ["bp", "bentuk pendidikan"])
@@ -189,11 +442,6 @@ def normalize_dapodik_columns(df):
     if sekolah_col is not None: rename_map[sekolah_col] = "Nama Sekolah"
     if pd_col is not None: rename_map[pd_col] = "PD"
     if guru_col is not None: rename_map[guru_col] = "Guru"
-    if pegawai_col is not None: rename_map[pegawai_col] = "Pegawai"
-    if rombel_col is not None: rename_map[rombel_col] = "Rombel"
-    if rkelas_col is not None: rename_map[rkelas_col] = "R.Kelas"
-    if rlab_col is not None: rename_map[rlab_col] = "R.Lab"
-    if rperpus_col is not None: rename_map[rperpus_col] = "R.Perpus"
     if bp_col is not None: rename_map[bp_col] = "BP"
     if status_col is not None: rename_map[status_col] = "Status"
 
@@ -555,8 +803,9 @@ def build_map_html(geojson_data, df_agg, geojson_name_field):
     return m.get_root().render()
 
 
-if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
-    st.subheader("Ekstrak Data Dapodik")
+if nav_choice == "ekstrak data sekolah sd dan smp negeri":
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("📥 Ekstrak Data Dapodik")
     st.caption("Upload file Dapodik dan GeoJSON, lalu jalankan ekstraksi secara manual. Tidak ada penyaringan otomatis saat file dipilih.")
     col_left, col_right = st.columns([1.2, 0.8])
 
@@ -569,8 +818,9 @@ if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
 
         if uploaded_files:
             st.caption("File yang dipilih akan disimpan dulu. Nama kecamatan akan dikenali otomatis dari nama file atau kolom yang tersedia.")
-            st.markdown("**File aktif**")
-            st.write([f.name for f in uploaded_files])
+            with st.container():
+                st.markdown("**File aktif**")
+                st.write([f.name for f in uploaded_files])
 
             if st.button("Simpan file Dapodik", use_container_width=True):
                 try:
@@ -640,8 +890,8 @@ if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
         if st.session_state["raw_df"] is not None:
             st.success("Data Dapodik sudah tersimpan dan siap diproses.")
 
-            st.subheader("Hasil Ekstraksi Data (SD & SMP Negeri)")
-            st.caption("Tekan tombol di bawah ini untuk menjalankan penyaringan data bersih secara manual. Hasil yang ditampilkan dan diunduh difokuskan ke kolom penting untuk algoritma.")
+            st.markdown("#### 🧹 Hasil Ekstraksi Data (SD & SMP Negeri)")
+            st.caption("Tekan tombol di bawah ini untuk menjalankan penyaringan data bersih secara manual.")
 
             if st.button("Ekstrak Data SD & SMP Negeri", type="primary", use_container_width=True):
                 extracted_df = st.session_state["raw_df"].copy()
@@ -660,13 +910,10 @@ if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
 
             if st.session_state["extraction_done"] and st.session_state["extracted_df"] is not None:
                 extracted_df = st.session_state["extracted_df"]
-                preferred_columns = ["Kecamatan", "Nama Sekolah", "BP", "Status", "PD", "Guru", "Pegawai", "Rombel", "R.Kelas", "R.Lab", "R.Perpus"]
-                preview_columns = [col for col in preferred_columns if col in extracted_df.columns]
-                cleaned_export_df = extracted_df[preview_columns].copy()
+                preview_columns = [col for col in ["Kecamatan", "Nama Sekolah", "BP", "Status", "PD", "Guru", "Sumber_File"] if col in extracted_df.columns]
+                st.dataframe(extracted_df[preview_columns], height=220, use_container_width=True)
 
-                st.dataframe(cleaned_export_df, height=220, use_container_width=True, hide_index=True)
-
-                csv_bersih = cleaned_export_df.to_csv(index=False).encode("utf-8")
+                csv_bersih = extracted_df.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     label="⬇️ Unduh Data Bersih SD & SMP Negeri (CSV)",
                     data=csv_bersih,
@@ -677,7 +924,7 @@ if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
                 )
             else:
                 st.info("Belum ada data bersih yang diekstrak. Klik tombol ekstraksi untuk menampilkan preview dan unduhan.")
-            st.divider()
+            st.markdown("---")
 
         if st.button("Proses Data Dapodik", type="primary", disabled=st.session_state["raw_df"] is None):
             try:
@@ -705,13 +952,12 @@ if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
                 cluster_profile["Nama_Klaster"] = cluster_profile["Klaster"].map(cluster_names_dict)
                 display_profile = cluster_profile[["Klaster", "Nama_Klaster", "Jumlah_Kecamatan", "Rata_Rata_Sekolah", "Rata_Rata_PD", "Rata_Rata_Guru", "Rata_Rasio_PD_Sekolah", "Rata_Rasio_PD_Guru"]].copy()
                 display_profile.columns = ["Klaster", "Nama Klaster", "Jml Kecamatan", "Rata2 Sekolah", "Rata2 PD", "Rata2 Guru", "Rata2 Rasio PD/Sekolah", "Rata2 Rasio PD/Guru"]
-                st.dataframe(display_profile, use_container_width=True, hide_index=True)
+                st.dataframe(display_profile, use_container_width=True)
                 
                 st.subheader("📊 Hasil Klasterisasi per Kecamatan")
                 st.dataframe(
                     processed_df[["Kecamatan", "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Rasio_PD_Sekolah", "Rasio_PD_Guru", "Nama_Klaster"]],
                     use_container_width=True,
-                    hide_index=True,
                 )
 
                 csv_bytes = processed_df.to_csv(index=False).encode("utf-8")
@@ -726,8 +972,12 @@ if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
 
         if st.session_state["processed_df"] is None:
             st.info("👈 Upload lalu simpan file Dapodik terlebih dahulu. Jika ingin data bersih, tekan tombol ekstraksi sebelum proses klaster.")
-elif nav_choice == "Menampilkan WebGIS":
-    st.subheader("Dashboard WebGIS")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+elif nav_choice == "menampilkan webgisnya":
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("📍 Dashboard WebGIS")
     st.caption("Peta ini selaras dengan hasil K-Means++ dan disusun agar tampil seperti dashboard analitis.")
 
     processed_df = st.session_state.get("processed_df")
@@ -771,7 +1021,7 @@ elif nav_choice == "Menampilkan WebGIS":
                 components.html(map_html, height=650, scrolling=False)
 
             with right:
-                st.subheader("Profil Klaster (Rata-rata Indikator)")
+                st.markdown("### Profil Klaster (Rata-rata Indikator)")
                 cluster_profile = profile_clusters(processed_df)
                 cluster_names = {
                     0: "Sangat Kritis",
@@ -789,14 +1039,22 @@ elif nav_choice == "Menampilkan WebGIS":
                     avg_guru = f"{row['Rata_Rata_Guru']:.0f}"
                     avg_rasio_pd_sekolah = f"{row['Rata_Rasio_PD_Sekolah']:.1f}"
                     avg_rasio_pd_guru = f"{row['Rata_Rasio_PD_Guru']:.1f}"
-
-                    with st.container():
-                        st.markdown(f"**Klaster {klaster} - {label}**")
-                        st.caption(
-                            f"Kecamatan: {n_kec} | Rata-rata Sekolah: {avg_sekolah} | Rata-rata PD: {avg_pd} | Rata-rata Guru: {avg_guru} | Rasio PD/Sekolah: {avg_rasio_pd_sekolah} | Rasio PD/Guru: {avg_rasio_pd_guru}"
-                        )
-                        st.divider()
+                    
+                    st.markdown(
+                        f"""
+                        <div style="padding:14px;border-radius:12px;border:2px solid rgba(0,0,0,0.1);margin-bottom:12px;background:rgba(245,245,245,0.5);">
+                            <div style="font-weight:700;margin-bottom:6px;font-size:14px;">Klaster {klaster} - {label}</div>
+                            <div style="font-size:12px;color:#555;line-height:1.6;">
+                                <b>Kecamatan:</b> {n_kec} | <b>Rata-rata Sekolah:</b> {avg_sekolah}<br/>
+                                <b>Rata-rata PD:</b> {avg_pd} | <b>Rata-rata Guru:</b> {avg_guru}<br/>
+                                <b>Rasio PD/Sekolah:</b> {avg_rasio_pd_sekolah} | <b>Rasio PD/Guru:</b> {avg_rasio_pd_guru}
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
             st.caption(f"GeoJSON field yang dipakai sebagai pengikat wilayah: {geojson_name_field}")
         except Exception as e:
             st.error(f"⚠️ Terjadi kesalahan saat merender peta: {e}")
+    st.markdown('</div>', unsafe_allow_html=True)

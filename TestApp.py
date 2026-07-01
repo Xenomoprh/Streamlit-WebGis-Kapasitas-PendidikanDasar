@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 import streamlit.components.v1 as components
 import re
 from difflib import get_close_matches, SequenceMatcher
-
+#stress wak
 try:
     from openpyxl import load_workbook
 except Exception:
@@ -443,7 +443,12 @@ def normalize_name(text):
 
 def prepare_map_geojson(geojson_data, df_agg, geojson_name_field):
     geojson_map = deepcopy(geojson_data)
-    cluster_colors = {0: "#d73027", 1: "#fc8d59", 2: "#91cf60", 3: "#1a9850"}
+    cluster_colors = {
+        0: "#d7191c", # Merah Tua (Sangat Kritis)
+        1: "#fdae61", # Oranye Terang (Kurang Memadai)
+        2: "#abd9e9", # Biru Muda (Memadai)
+        3: "#2c7bb6"  # Biru Tua (Sangat Berlebih)
+    }
 
     lookup = df_agg.set_index("Kec_Mapping").to_dict(orient="index")
 
@@ -530,10 +535,10 @@ def build_map_html(geojson_data, df_agg, geojson_name_field):
         min-width: 210px;
     ">
         <div style="font-weight: 700; margin-bottom: 8px;">Legenda Klaster</div>
-        <div><span style="display:inline-block;width:12px;height:12px;background:#d73027;margin-right:8px;border-radius:3px"></span>Sangat Kritis</div>
-        <div><span style="display:inline-block;width:12px;height:12px;background:#fc8d59;margin-right:8px;border-radius:3px"></span>Kurang Memadai</div>
-        <div><span style="display:inline-block;width:12px;height:12px;background:#91cf60;margin-right:8px;border-radius:3px"></span>Memadai / Aman</div>
-        <div><span style="display:inline-block;width:12px;height:12px;background:#1a9850;margin-right:8px;border-radius:3px"></span>Sangat Berlebih</div>
+        <div><span style="display:inline-block;width:12px;height:12px;background:#d7191c;margin-right:8px;border-radius:3px"></span>Sangat Kritis</div>
+        <div><span style="display:inline-block;width:12px;height:12px;background:#fdae61;margin-right:8px;border-radius:3px"></span>Kurang Memadai</div>
+        <div><span style="display:inline-block;width:12px;height:12px;background:#abd9e9;margin-right:8px;border-radius:3px"></span>Memadai / Aman</div>
+        <div><span style="display:inline-block;width:12px;height:12px;background:#2c7bb6;margin-right:8px;border-radius:3px"></span>Sangat Berlebih</div>
     </div>
     """
     m.get_root().html.add_child(folium.Element(legend_html))
