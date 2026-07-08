@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 import streamlit.components.v1 as components
 import re
 from difflib import get_close_matches, SequenceMatcher
-#stress wak
+
 try:
     from openpyxl import load_workbook
 except Exception:
@@ -22,12 +22,26 @@ except Exception:
 # KONFIGURASI HALAMAN STREAMLIT
 # ==========================================
 st.set_page_config(page_title="WebGIS Pendidikan Medan", layout="wide")
-st.title("🗺️ Pemetaan Kesenjangan Kapasitas Pendidikan Dasar Negeri Kota Medan")
-st.markdown("""
-Aplikasi WebGIS ini mengelompokkan 21 Kecamatan di Kota Medan menggunakan algoritma **K-Means++** berdasarkan data kapasitas infrastruktur (Jumlah Sekolah, Guru, dan Peserta Didik) dari sistem Dapodik.
-""")
 
-TAB_INPUT, TAB_PREVIEW = st.tabs(["1. Data & Proses", "2. Peta WebGIS"])
+st.title("Pemetaan Kesenjangan Kapasitas Pendidikan Dasar Negeri Kota Medan")
+st.caption(
+    "Aplikasi memproses data Dapodik, mengekstrak sekolah SD dan SMP negeri, lalu menampilkan hasil klaster K-Means++ ke dalam WebGIS yang terhubung ke GeoJSON kecamatan."
+)
+
+st.sidebar.title("WebGIS Pendidikan Medan")
+st.sidebar.caption("Dashboard klasterisasi kapasitas SD & SMP negeri")
+st.sidebar.divider()
+
+nav_choice = st.sidebar.radio(
+    "Navigasi",
+    ["Ekstrak data sekolah SD dan SMP negeri", "Menampilkan WebGIS"],
+    index=0,
+)
+
+st.sidebar.caption("Gunakan menu untuk berpindah antara ekstraksi data bersih dan tampilan peta hasil klaster.")
+
+st.divider()
+st.write("21 kecamatan • K-Means++ • GeoJSON linked • SD & SMP negeri")
 
 GEOJSON_PATH = "medan_kecamatan.geojson"
 
@@ -41,26 +55,10 @@ if "geojson_data" not in st.session_state:
     st.session_state["geojson_data"] = None
 if "geojson_name" not in st.session_state:
     st.session_state["geojson_name"] = None
-
-
-st.markdown(
-    """
-    <style>
-    .section-card {
-        background: linear-gradient(135deg, rgba(13,110,253,0.08), rgba(25,135,84,0.08));
-        border: 1px solid rgba(0,0,0,0.06);
-        border-radius: 16px;
-        padding: 16px 18px;
-        margin-bottom: 12px;
-    }
-    .small-note {
-        color: #6c757d;
-        font-size: 0.92rem;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+if "extracted_df" not in st.session_state:
+    st.session_state["extracted_df"] = None
+if "extraction_done" not in st.session_state:
+    st.session_state["extraction_done"] = False
 
 
 @st.cache_data(show_spinner=False)
@@ -177,6 +175,11 @@ def normalize_dapodik_columns(df):
     sekolah_col = infer_column({"nama sekolah", "sekolah"}, ["nama sekolah", "sekolah", "school"])
     pd_col = infer_column({"pd", "peserta didik", "siswa"}, ["pd", "peserta didik", "jumlah siswa", "siswa"])
     guru_col = infer_column({"guru"}, ["guru", "pendidik"])
+    pegawai_col = infer_column({"pegawai"}, ["pegawai", "tenaga kependidikan", "tendik"])
+    rombel_col = infer_column({"rombel"}, ["rombel", "jumlah rombel"])
+    rkelas_col = infer_column({"r.kelas", "r kelas"}, ["r.kelas", "r kelas", "ruang kelas", "kelas"])
+    rlab_col = infer_column({"r.lab", "r lab"}, ["r.lab", "r lab", "laboratorium", "lab"])
+    rperpus_col = infer_column({"r.perpus", "r perpus"}, ["r.perpus", "r perpus", "perpus", "perpustakaan"])
     
     # Menangkap kolom BP (Bentuk Pendidikan) dan Status
     bp_col = infer_column({"bp", "bentuk pendidikan"}, ["bp", "bentuk pendidikan"])
@@ -186,6 +189,11 @@ def normalize_dapodik_columns(df):
     if sekolah_col is not None: rename_map[sekolah_col] = "Nama Sekolah"
     if pd_col is not None: rename_map[pd_col] = "PD"
     if guru_col is not None: rename_map[guru_col] = "Guru"
+    if pegawai_col is not None: rename_map[pegawai_col] = "Pegawai"
+    if rombel_col is not None: rename_map[rombel_col] = "Rombel"
+    if rkelas_col is not None: rename_map[rkelas_col] = "R.Kelas"
+    if rlab_col is not None: rename_map[rlab_col] = "R.Lab"
+    if rperpus_col is not None: rename_map[rperpus_col] = "R.Perpus"
     if bp_col is not None: rename_map[bp_col] = "BP"
     if status_col is not None: rename_map[status_col] = "Status"
 
@@ -547,11 +555,10 @@ def build_map_html(geojson_data, df_agg, geojson_name_field):
     return m.get_root().render()
 
 
-with TAB_INPUT:
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("📥 Upload Data dan GeoJSON")
-    st.caption("Data Dapodik disimpan dulu. Proses klasterisasi hanya dijalankan saat tombol ditekan.")
-    col_left, col_right = st.columns(2)
+if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
+    st.subheader("Ekstrak Data Dapodik")
+    st.caption("Upload file Dapodik dan GeoJSON, lalu jalankan ekstraksi secara manual. Tidak ada penyaringan otomatis saat file dipilih.")
+    col_left, col_right = st.columns([1.2, 0.8])
 
     with col_left:
         uploaded_files = st.file_uploader(
@@ -562,10 +569,10 @@ with TAB_INPUT:
 
         if uploaded_files:
             st.caption("File yang dipilih akan disimpan dulu. Nama kecamatan akan dikenali otomatis dari nama file atau kolom yang tersedia.")
-            st.write("File aktif:")
+            st.markdown("**File aktif**")
             st.write([f.name for f in uploaded_files])
 
-            if st.button("Simpan file Dapodik"):
+            if st.button("Simpan file Dapodik", use_container_width=True):
                 try:
                     df_list = []
                     file_names = []
@@ -590,9 +597,11 @@ with TAB_INPUT:
                     st.session_state["raw_df"] = raw_df
                     st.session_state["raw_file_names"] = file_names
                     st.session_state["processed_df"] = None
+                    st.session_state["extracted_df"] = None
+                    st.session_state["extraction_done"] = False
 
                     st.success(f"✅ {len(uploaded_files)} file berhasil disimpan. Data lama sudah diganti.")
-                    st.info("Silakan klik tombol Proses Data Dapodik untuk menjalankan klasterisasi dan sinkronisasi ke peta.")
+                    st.info("File tersimpan. Klik tombol ekstraksi untuk membuat data bersih SD & SMP negeri.")
                 except Exception as e:
                     st.error(f"⚠️ Terjadi kesalahan saat menyimpan file: {e}")
 
@@ -612,7 +621,7 @@ with TAB_INPUT:
                 except Exception as e:
                     st.error(f"⚠️ GeoJSON gagal diperbarui: {e}")
 
-    st.info("Upload satu atau beberapa file Dapodik sekaligus. Hasilnya akan digabung, diproses, lalu ditampilkan di tab preview.")
+    st.info("Upload satu atau beberapa file Dapodik sekaligus. Hasilnya akan digabung lalu disiapkan untuk ekstraksi dan proses klaster.")
 
     with st.expander("Status file aktif", expanded=True):
         if st.session_state["raw_file_names"]:
@@ -630,41 +639,45 @@ with TAB_INPUT:
 
         if st.session_state["raw_df"] is not None:
             st.success("Data Dapodik sudah tersimpan dan siap diproses.")
-            
-            # =========================================================
-            # TAMBAHAN FITUR: PREVIEW & DOWNLOAD DATA BERSIH (EKSTRAKSI)
-            # =========================================================
-            st.markdown("#### 🧹 Hasil Ekstraksi Data (SD & SMP Negeri)")
-            st.caption("Sistem menyaring otomatis data sekolah menjadi khusus SD dan SMP berstatus Negeri dari file mentah yang Anda unggah.")
-            
-            # Menduplikasi proses filter untuk ditampilkan dan diunduh oleh user
-            extracted_df = st.session_state["raw_df"].copy()
-            if "BP" in extracted_df.columns:
-                extracted_df = extracted_df[extracted_df["BP"].astype(str).str.strip().str.upper().isin(["SD", "SMP"])]
-            if "Status" in extracted_df.columns:
-                extracted_df = extracted_df[extracted_df["Status"].astype(str).str.strip().str.upper() == "NEGERI"]
-            
-            # Menghapus baris kosong agar tabel rapi
-            extracted_df = extracted_df.dropna(subset=["Kecamatan", "PD", "Guru"])
 
-            if "Kecamatan" in extracted_df.columns:
-                extracted_df["Kecamatan"] = extracted_df["Kecamatan"].astype(str).str.replace("nan", "", regex=False).str.strip()
-            
-            # Menampilkan preview tabel bersih
-            preview_columns = [col for col in ["Kecamatan", "Nama Sekolah", "BP", "Status", "PD", "Guru", "Sumber_File"] if col in extracted_df.columns]
-            st.dataframe(extracted_df[preview_columns], height=200, use_container_width=True)
-            
-            # Tombol unduh file bersih CSV
-            csv_bersih = extracted_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="⬇️ Unduh Data Bersih SD & SMP Negeri (CSV)",
-                data=csv_bersih,
-                file_name="Data_SD_SMP_Negeri_Medan_Clean.csv",
-                mime="text/csv",
-                help="Gunakan file ini sebagai lampiran data skripsi Anda."
-            )
-            st.markdown("---")
-            # =========================================================
+            st.subheader("Hasil Ekstraksi Data (SD & SMP Negeri)")
+            st.caption("Tekan tombol di bawah ini untuk menjalankan penyaringan data bersih secara manual. Hasil yang ditampilkan dan diunduh difokuskan ke kolom penting untuk algoritma.")
+
+            if st.button("Ekstrak Data SD & SMP Negeri", type="primary", use_container_width=True):
+                extracted_df = st.session_state["raw_df"].copy()
+                if "BP" in extracted_df.columns:
+                    extracted_df = extracted_df[extracted_df["BP"].astype(str).str.strip().str.upper().isin(["SD", "SMP"])]
+                if "Status" in extracted_df.columns:
+                    extracted_df = extracted_df[extracted_df["Status"].astype(str).str.strip().str.upper() == "NEGERI"]
+
+                extracted_df = extracted_df.dropna(subset=["Kecamatan", "PD", "Guru"])
+
+                if "Kecamatan" in extracted_df.columns:
+                    extracted_df["Kecamatan"] = extracted_df["Kecamatan"].astype(str).str.replace("nan", "", regex=False).str.strip()
+
+                st.session_state["extracted_df"] = extracted_df
+                st.session_state["extraction_done"] = True
+
+            if st.session_state["extraction_done"] and st.session_state["extracted_df"] is not None:
+                extracted_df = st.session_state["extracted_df"]
+                preferred_columns = ["Kecamatan", "Nama Sekolah", "BP", "Status", "PD", "Guru", "Pegawai", "Rombel", "R.Kelas", "R.Lab", "R.Perpus"]
+                preview_columns = [col for col in preferred_columns if col in extracted_df.columns]
+                cleaned_export_df = extracted_df[preview_columns].copy()
+
+                st.dataframe(cleaned_export_df, height=220, use_container_width=True, hide_index=True)
+
+                csv_bersih = cleaned_export_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="⬇️ Unduh Data Bersih SD & SMP Negeri (CSV)",
+                    data=csv_bersih,
+                    file_name="Data_SD_SMP_Negeri_Medan_Clean.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    help="Gunakan file ini sebagai lampiran data skripsi Anda.",
+                )
+            else:
+                st.info("Belum ada data bersih yang diekstrak. Klik tombol ekstraksi untuk menampilkan preview dan unduhan.")
+            st.divider()
 
         if st.button("Proses Data Dapodik", type="primary", disabled=st.session_state["raw_df"] is None):
             try:
@@ -674,7 +687,8 @@ with TAB_INPUT:
                     if geojson_for_matching and "features" in geojson_for_matching:
                         geojson_names = extract_geojson_names(geojson_for_matching)
 
-                    processed_df = process_dapodik_data(st.session_state["raw_df"], geojson_names=geojson_names)
+                    source_df = st.session_state["extracted_df"] if st.session_state["extraction_done"] and st.session_state["extracted_df"] is not None else st.session_state["raw_df"]
+                    processed_df = process_dapodik_data(source_df, geojson_names=geojson_names)
                     st.session_state["processed_df"] = processed_df
 
                 st.success("✅ Data berhasil diproses.")
@@ -691,12 +705,13 @@ with TAB_INPUT:
                 cluster_profile["Nama_Klaster"] = cluster_profile["Klaster"].map(cluster_names_dict)
                 display_profile = cluster_profile[["Klaster", "Nama_Klaster", "Jumlah_Kecamatan", "Rata_Rata_Sekolah", "Rata_Rata_PD", "Rata_Rata_Guru", "Rata_Rasio_PD_Sekolah", "Rata_Rasio_PD_Guru"]].copy()
                 display_profile.columns = ["Klaster", "Nama Klaster", "Jml Kecamatan", "Rata2 Sekolah", "Rata2 PD", "Rata2 Guru", "Rata2 Rasio PD/Sekolah", "Rata2 Rasio PD/Guru"]
-                st.dataframe(display_profile, use_container_width=True)
+                st.dataframe(display_profile, use_container_width=True, hide_index=True)
                 
                 st.subheader("📊 Hasil Klasterisasi per Kecamatan")
                 st.dataframe(
                     processed_df[["Kecamatan", "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Rasio_PD_Sekolah", "Rasio_PD_Guru", "Nama_Klaster"]],
                     use_container_width=True,
+                    hide_index=True,
                 )
 
                 csv_bytes = processed_df.to_csv(index=False).encode("utf-8")
@@ -710,20 +725,16 @@ with TAB_INPUT:
                 st.error(f"⚠️ Terjadi kesalahan saat memproses file: {e}")
 
         if st.session_state["processed_df"] is None:
-            st.info("👈 Upload lalu simpan file Dapodik terlebih dahulu, kemudian tekan tombol Proses Data Dapodik.")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-
-with TAB_PREVIEW:
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("📍 Dashboard WebGIS")
-    st.caption("Peta ini selaras dengan hasil K-Means++ dan dibuat ringan agar tidak reload berulang saat digeser.")
+            st.info("👈 Upload lalu simpan file Dapodik terlebih dahulu. Jika ingin data bersih, tekan tombol ekstraksi sebelum proses klaster.")
+elif nav_choice == "Menampilkan WebGIS":
+    st.subheader("Dashboard WebGIS")
+    st.caption("Peta ini selaras dengan hasil K-Means++ dan disusun agar tampil seperti dashboard analitis.")
 
     processed_df = st.session_state.get("processed_df")
     geojson_data = load_geojson_data()
 
     if processed_df is None:
-        st.warning("Belum ada data hasil proses. Silakan buka tab Input & Proses dan upload file Dapodik terlebih dahulu.")
+        st.warning("Belum ada data hasil proses. Silakan kembali ke menu ekstraksi dan jalankan proses data terlebih dahulu.")
     elif geojson_data is None:
         st.error(f"File GeoJSON '{GEOJSON_PATH}' tidak ditemukan. Upload GeoJSON terlebih dahulu atau letakkan file di folder yang sama.")
     else:
@@ -752,7 +763,6 @@ with TAB_PREVIEW:
             m3.metric("Peserta Didik", f"{total_pd:,}".replace(",", "."))
             m4.metric("Guru", f"{total_guru:,}".replace(",", "."))
             st.caption(f"Match GeoJSON ke data klaster: {matched} cocok, {missing} belum cocok")
-            st.caption("Penghubung peta memakai normalisasi nama kecamatan, bukan pemetaan manual per file.")
 
             left, right = st.columns([2, 1])
             with left:
@@ -760,7 +770,7 @@ with TAB_PREVIEW:
                 components.html(map_html, height=650, scrolling=False)
 
             with right:
-                st.markdown("### Profil Klaster (Rata-rata Indikator)")
+                st.subheader("Profil Klaster (Rata-rata Indikator)")
                 cluster_profile = profile_clusters(processed_df)
                 cluster_names = {
                     0: "Sangat Kritis",
@@ -778,22 +788,14 @@ with TAB_PREVIEW:
                     avg_guru = f"{row['Rata_Rata_Guru']:.0f}"
                     avg_rasio_pd_sekolah = f"{row['Rata_Rasio_PD_Sekolah']:.1f}"
                     avg_rasio_pd_guru = f"{row['Rata_Rasio_PD_Guru']:.1f}"
-                    
-                    st.markdown(
-                        f"""
-                        <div style="padding:14px;border-radius:12px;border:2px solid rgba(0,0,0,0.1);margin-bottom:12px;background:rgba(245,245,245,0.5);">
-                            <div style="font-weight:700;margin-bottom:6px;font-size:14px;">Klaster {klaster} - {label}</div>
-                            <div style="font-size:12px;color:#555;line-height:1.6;">
-                                <b>Kecamatan:</b> {n_kec} | <b>Rata-rata Sekolah:</b> {avg_sekolah}<br/>
-                                <b>Rata-rata PD:</b> {avg_pd} | <b>Rata-rata Guru:</b> {avg_guru}<br/>
-                                <b>Rasio PD/Sekolah:</b> {avg_rasio_pd_sekolah} | <b>Rasio PD/Guru:</b> {avg_rasio_pd_guru}
-                            </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+
+                    with st.container():
+                        st.markdown(f"**Klaster {klaster} - {label}**")
+                        st.caption(
+                            f"Kecamatan: {n_kec} | Rata-rata Sekolah: {avg_sekolah} | Rata-rata PD: {avg_pd} | Rata-rata Guru: {avg_guru} | Rasio PD/Sekolah: {avg_rasio_pd_sekolah} | Rasio PD/Guru: {avg_rasio_pd_guru}"
+                        )
+                        st.divider()
 
             st.caption(f"GeoJSON field yang dipakai sebagai pengikat wilayah: {geojson_name_field}")
         except Exception as e:
             st.error(f"⚠️ Terjadi kesalahan saat merender peta: {e}")
-    st.markdown('</div>', unsafe_allow_html=True)

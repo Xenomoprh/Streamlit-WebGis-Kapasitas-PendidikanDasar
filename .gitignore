@@ -1,2 +1,4 @@
 /CONTEXT.md
 /ewe.md
+__pycache__/
+*.pyc

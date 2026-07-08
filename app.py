@@ -7,16 +7,19 @@ from sklearn.cluster import KMeans
 import json
 import os
 from copy import deepcopy
+from io import BytesIO
 import zipfile
 import xml.etree.ElementTree as ET
 import streamlit.components.v1 as components
 import re
 from difflib import get_close_matches, SequenceMatcher
-#stress wak
+
 try:
     from openpyxl import load_workbook
 except Exception:
     load_workbook = None
+
+from sklearn.metrics import silhouette_score
 
 # ==========================================
 # KONFIGURASI HALAMAN STREAMLIT
@@ -34,7 +37,7 @@ st.sidebar.divider()
 
 nav_choice = st.sidebar.radio(
     "Navigasi",
-    ["Ekstrak data sekolah SD dan SMP negeri", "Menampilkan WebGIS"],
+    ["Ekstrak data sekolah SD dan SMP negeri", "Menampilkan WebGIS", "Evaluasi Model"],
     index=0,
 )
 
@@ -59,6 +62,8 @@ if "extracted_df" not in st.session_state:
     st.session_state["extracted_df"] = None
 if "extraction_done" not in st.session_state:
     st.session_state["extraction_done"] = False
+if "extraction_summary" not in st.session_state:
+    st.session_state["extraction_summary"] = None
 
 
 @st.cache_data(show_spinner=False)
@@ -115,6 +120,103 @@ def extract_geojson_names(geojson_data):
         if value:
             names.append(str(value).strip())
     return names
+
+
+def build_extraction_summary(df):
+    total_rows = len(df)
+    sd_count = 0
+    smp_count = 0
+
+    if "BP" in df.columns:
+        bp_values = df["BP"].astype(str).str.strip().str.upper()
+        sd_count = int(bp_values.eq("SD").sum())
+        smp_count = int(bp_values.eq("SMP").sum())
+
+    return {
+        "total_rows": int(total_rows),
+        "sd_count": sd_count,
+        "smp_count": smp_count,
+    }
+
+
+def build_cluster_report_df(df_agg):
+    report_columns = [
+        "Kecamatan",
+        "Jumlah_Sekolah",
+        "Jumlah_PD",
+        "Jumlah_Guru",
+        "Rasio_PD_Sekolah",
+        "Rasio_PD_Guru",
+        "Klaster",
+        "Nama_Klaster",
+    ]
+
+    extra_columns = [
+        "Rata_Rata_Sekolah_Per_Kec",
+        "Rata_Rata_PD_Per_Kec",
+        "Rata_Rata_Guru_Per_Kec",
+    ]
+
+    available_columns = [col for col in report_columns + extra_columns if col in df_agg.columns]
+    report_df = df_agg[available_columns].copy()
+
+    if "Klaster" in report_df.columns:
+        report_df["Klaster"] = report_df["Klaster"].astype("Int64")
+
+    return report_df.sort_values("Kecamatan").reset_index(drop=True)
+
+
+def create_excel_download_bytes(df, sheet_name="Klaster"):
+    buffer = BytesIO()
+    writer_engines = ["openpyxl", "xlsxwriter"]
+    last_error = None
+
+    for engine in writer_engines:
+        try:
+            with pd.ExcelWriter(buffer, engine=engine) as writer:
+                df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+            buffer.seek(0)
+            return buffer.getvalue()
+        except Exception as exc:
+            last_error = exc
+            buffer.seek(0)
+            buffer.truncate(0)
+
+    raise RuntimeError(f"Excel export gagal: {last_error}")
+
+
+def evaluate_kmeans_candidates(df_agg, max_k=8):
+    feature_columns = ["Jumlah_Sekolah", "Rasio_PD_Sekolah", "Rasio_PD_Guru", "Jumlah_PD"]
+    features = df_agg[feature_columns].dropna().copy()
+
+    if len(features) < 3:
+        raise ValueError("Data terlalu sedikit untuk evaluasi klaster.")
+
+    max_k = min(max_k, len(features))
+    if max_k < 2:
+        raise ValueError("Minimal diperlukan 2 data untuk evaluasi K-Means.")
+
+    scaler = StandardScaler()
+    features_scaled = scaler.fit_transform(features)
+
+    rows = []
+    for k in range(2, max_k + 1):
+        model = KMeans(n_clusters=k, init="k-means++", random_state=42, n_init=10)
+        labels = model.fit_predict(features_scaled)
+        silhouette = silhouette_score(features_scaled, labels) if len(set(labels)) > 1 else None
+
+        rows.append(
+            {
+                "k": k,
+                "inertia": float(model.inertia_),
+                "silhouette_score": float(silhouette) if silhouette is not None else None,
+            }
+        )
+
+    evaluation_df = pd.DataFrame(rows)
+    best_row = evaluation_df.loc[evaluation_df["silhouette_score"].idxmax()]
+
+    return evaluation_df, int(best_row["k"]), float(best_row["silhouette_score"])
 
 
 def infer_kecamatan_from_filename(file_name, candidate_names=None):
@@ -599,6 +701,7 @@ if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
                     st.session_state["processed_df"] = None
                     st.session_state["extracted_df"] = None
                     st.session_state["extraction_done"] = False
+                    st.session_state["extraction_summary"] = None
 
                     st.success(f"✅ {len(uploaded_files)} file berhasil disimpan. Data lama sudah diganti.")
                     st.info("File tersimpan. Klik tombol ekstraksi untuk membuat data bersih SD & SMP negeri.")
@@ -660,6 +763,14 @@ if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
 
             if st.session_state["extraction_done"] and st.session_state["extracted_df"] is not None:
                 extracted_df = st.session_state["extracted_df"]
+                extraction_summary = st.session_state.get("extraction_summary") or build_extraction_summary(extracted_df)
+                st.session_state["extraction_summary"] = extraction_summary
+
+                summary_m1, summary_m2, summary_m3 = st.columns(3)
+                summary_m1.metric("Total hasil ekstraksi", extraction_summary["total_rows"])
+                summary_m2.metric("SD berhasil diekstrak", extraction_summary["sd_count"])
+                summary_m3.metric("SMP berhasil diekstrak", extraction_summary["smp_count"])
+
                 preferred_columns = ["Kecamatan", "Nama Sekolah", "BP", "Status", "PD", "Guru", "Pegawai", "Rombel", "R.Kelas", "R.Lab", "R.Perpus"]
                 preview_columns = [col for col in preferred_columns if col in extracted_df.columns]
                 cleaned_export_df = extracted_df[preview_columns].copy()
@@ -741,6 +852,7 @@ elif nav_choice == "Menampilkan WebGIS":
         try:
             geojson_name_field = get_geojson_name_field(geojson_data)
             map_geojson = prepare_map_geojson(geojson_data, processed_df, geojson_name_field)
+            extraction_summary = st.session_state.get("extraction_summary")
 
             matched = 0
             missing = 0
@@ -763,7 +875,40 @@ elif nav_choice == "Menampilkan WebGIS":
             m3.metric("Peserta Didik", f"{total_pd:,}".replace(",", "."))
             m4.metric("Guru", f"{total_guru:,}".replace(",", "."))
             st.caption(f"Match GeoJSON ke data klaster: {matched} cocok, {missing} belum cocok")
-            st.caption("Penghubung peta memakai normalisasi nama kecamatan, bukan pemetaan manual per file.")
+
+            if extraction_summary is not None:
+                ex1, ex2, ex3 = st.columns(3)
+                ex1.metric("Total hasil ekstraksi", extraction_summary.get("total_rows", 0))
+                ex2.metric("SD berhasil diekstrak", extraction_summary.get("sd_count", 0))
+                ex3.metric("SMP berhasil diekstrak", extraction_summary.get("smp_count", 0))
+
+            st.subheader("Hasil Proses yang Disimpan")
+            st.caption("Ringkasan ini tetap ditampilkan saat Anda berpindah ke tab WebGIS karena datanya diambil dari session state.")
+            result_preview = build_cluster_report_df(processed_df)
+            st.dataframe(result_preview, use_container_width=True, hide_index=True, height=280)
+
+            export_col1, export_col2 = st.columns(2)
+            csv_export = result_preview.to_csv(index=False).encode("utf-8")
+            export_col1.download_button(
+                label="Unduh Data Klastering (CSV)",
+                data=csv_export,
+                file_name="data_klastering_kecamatan_medan.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+            try:
+                excel_export = create_excel_download_bytes(result_preview, sheet_name="Klaster Medan")
+                export_col2.download_button(
+                    label="Unduh Data Klastering (Excel)",
+                    data=excel_export,
+                    file_name="data_klastering_kecamatan_medan.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except Exception as excel_error:
+                export_col2.button("Unduh Data Klastering (Excel)", disabled=True, use_container_width=True)
+                export_col2.caption(f"Export Excel belum tersedia: {excel_error}")
 
             left, right = st.columns([2, 1])
             with left:
@@ -779,10 +924,17 @@ elif nav_choice == "Menampilkan WebGIS":
                     2: "Memadai / Aman",
                     3: "Sangat Berlebih",
                 }
+                cluster_meanings = {
+                    0: "Kapasitas pendidikan sangat terbatas, rasio peserta didik tinggi, prioritas utama pemerataan.",
+                    1: "Kapasitas pendidikan belum optimal sehingga masih memerlukan peningkatan.",
+                    2: "Kapasitas pendidikan relatif seimbang dengan kebutuhan peserta didik.",
+                    3: "Kapasitas pendidikan relatif tinggi dan mampu melayani peserta didik dengan baik.",
+                }
                 
                 for _, row in cluster_profile.iterrows():
                     klaster = int(row["Klaster"])
                     label = cluster_names.get(klaster, "Tidak Diketahui")
+                    meaning = cluster_meanings.get(klaster, "")
                     n_kec = int(row["Jumlah_Kecamatan"])
                     avg_sekolah = f"{row['Rata_Rata_Sekolah']:.1f}"
                     avg_pd = f"{row['Rata_Rata_PD']:.0f}"
@@ -791,12 +943,58 @@ elif nav_choice == "Menampilkan WebGIS":
                     avg_rasio_pd_guru = f"{row['Rata_Rasio_PD_Guru']:.1f}"
 
                     with st.container():
-                        st.markdown(f"**Klaster {klaster} - {label}**")
-                        st.caption(
-                            f"Kecamatan: {n_kec} | Rata-rata Sekolah: {avg_sekolah} | Rata-rata PD: {avg_pd} | Rata-rata Guru: {avg_guru} | Rasio PD/Sekolah: {avg_rasio_pd_sekolah} | Rasio PD/Guru: {avg_rasio_pd_guru}"
+                        st.markdown(
+                            f"<div style='margin-bottom:0.35rem;'><strong>Klaster {klaster} - {label}</strong></div>"
+                            f"<div style='font-size:0.88rem; line-height:1.35; margin-bottom:0.45rem; color:rgba(255,255,255,0.78);'>{meaning}</div>",
+                            unsafe_allow_html=True,
                         )
-                        st.divider()
+                        st.caption(
+                            f"Kecamatan: {n_kec} | Sekolah: {avg_sekolah} | PD: {avg_pd} | Guru: {avg_guru} | Rasio PD/Sekolah: {avg_rasio_pd_sekolah} | Rasio PD/Guru: {avg_rasio_pd_guru}"
+                        )
+                        st.markdown("<div style='margin:0.35rem 0 0.2rem 0;'></div>", unsafe_allow_html=True)
 
             st.caption(f"GeoJSON field yang dipakai sebagai pengikat wilayah: {geojson_name_field}")
         except Exception as e:
             st.error(f"⚠️ Terjadi kesalahan saat merender peta: {e}")
+elif nav_choice == "Evaluasi Model":
+    st.subheader("Evaluasi Model K-Means++")
+    st.caption("Halaman ini menunjukkan bukti numerik untuk pemilihan jumlah klaster, terutama Elbow Method dan Silhouette Score.")
+
+    processed_df = st.session_state.get("processed_df")
+
+    if processed_df is None:
+        st.warning("Belum ada data hasil proses. Jalankan proses klaster terlebih dahulu sebelum membuka evaluasi model.")
+    else:
+        try:
+            evaluation_df, best_k, best_score = evaluate_kmeans_candidates(processed_df)
+
+            current_k = 4
+            best_message = f"Berdasarkan silhouette score tertinggi pada data ini, k terbaik adalah {best_k} dengan skor {best_score:.3f}."
+            if best_k == current_k:
+                best_message += " Ini konsisten dengan konfigurasi 4 klaster yang dipakai saat ini."
+            else:
+                best_message += f" Saat ini aplikasi memakai k = {current_k}, sehingga hasil evaluasi ini bisa dipakai sebagai bahan justifikasi atau penyesuaian."
+
+            st.info(best_message)
+
+            metric_col1, metric_col2 = st.columns(2)
+            metric_col1.metric("k terbaik menurut Silhouette", best_k)
+            metric_col2.metric("Skor Silhouette tertinggi", f"{best_score:.3f}")
+
+            chart_left, chart_right = st.columns(2)
+            with chart_left:
+                st.subheader("Elbow Method")
+                st.line_chart(evaluation_df.set_index("k")["inertia"])
+            with chart_right:
+                st.subheader("Silhouette Score")
+                st.line_chart(evaluation_df.set_index("k")["silhouette_score"])
+
+            st.subheader("Tabel Evaluasi K")
+            display_eval = evaluation_df.copy()
+            display_eval["silhouette_score"] = display_eval["silhouette_score"].map(lambda x: f"{x:.3f}" if pd.notna(x) else "-")
+            display_eval.columns = ["k", "Inertia", "Silhouette Score"]
+            st.dataframe(display_eval, use_container_width=True, hide_index=True)
+
+            st.caption("Elbow dipakai untuk melihat titik penurunan inertia yang mulai melandai, sedangkan silhouette score menunjukkan kualitas pemisahan antar klaster.")
+        except Exception as e:
+            st.error(f"⚠️ Evaluasi model gagal dijalankan: {e}")
