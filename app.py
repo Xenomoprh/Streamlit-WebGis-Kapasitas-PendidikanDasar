@@ -149,6 +149,8 @@ def build_cluster_report_df(df_agg):
         "Rasio_PD_Guru",
         "Klaster",
         "Nama_Klaster",
+        "Ranking",
+        "Prioritas_Intervensi",
     ]
 
     extra_columns = [
@@ -459,6 +461,66 @@ def best_name_match(source_name, candidate_names):
     return best_candidate if best_score >= 0.72 else None
 
 
+def assign_dynamic_labels(df_agg):
+    """
+    Fungsi Post-Hoc Cluster Interpretation (Lexicographical Ordering)
+    Mengurutkan klaster berdasarkan Rasio PD/Sekolah sebagai indikator utama.
+    Jika seri/berdekatan, Rasio PD/Guru menjadi pembanding sekunder.
+    Mengembalikan Label, Deskripsi, Warna, Ranking, dan Prioritas Intervensi.
+    """
+    # 1. Hitung rata-rata parameter per klaster
+    profile = df_agg.groupby("Klaster").agg(
+        Avg_Rasio_Sekolah=("Rasio_PD_Sekolah", "mean"),
+        Avg_Rasio_Guru=("Rasio_PD_Guru", "mean")
+    ).reset_index()
+
+    # 2. Pengurutan Bertingkat (Lexicographical Ordering)
+    # Urutkan dari rasio terendah (relatif aman) ke rasio tertinggi (kritis)
+    profile = profile.sort_values(
+        by=["Avg_Rasio_Sekolah", "Avg_Rasio_Guru"], 
+        ascending=[True, True]
+    ).reset_index(drop=True)
+
+    dynamic_names = {}
+    dynamic_descriptions = {}
+    dynamic_colors = {}
+    dynamic_ranks = {}
+    dynamic_priorities = {}
+
+    # Kumpulan Label Akademis
+    labels = ["Sangat Memadai", "Memadai", "Kurang Memadai", "Sangat Kritis"]
+    
+    # Warna terikat mutlak pada ranking (Hijau Tua -> Merah Tua)
+    colors = ["#1a9641", "#a6d96a", "#fdae61", "#d7191c"] 
+    
+    # Deskripsi murni berdasarkan indikator penelitian (tanpa asumsi)
+    desc = [
+        "Kapasitas layanan pendidikan relatif paling baik dibandingkan klaster lainnya. Rasio peserta didik terhadap sekolah dan guru berada pada tingkat yang lebih rendah sehingga kapasitas layanan dinilai mampu memenuhi kebutuhan peserta didik dengan baik.",
+
+        "Kapasitas layanan pendidikan relatif memadai. Ketersediaan sekolah dan tenaga pendidik masih mampu mengimbangi jumlah peserta didik, meskipun tetap memerlukan pemantauan terhadap perubahan kebutuhan layanan.",
+
+        "Kapasitas layanan pendidikan mulai mengalami tekanan. Rasio peserta didik terhadap sekolah dan guru relatif lebih tinggi sehingga diperlukan perhatian dalam upaya pemerataan kapasitas pendidikan.",
+
+        "Kapasitas layanan pendidikan paling terbatas dibandingkan klaster lainnya. Tingginya rasio peserta didik terhadap sekolah dan guru menunjukkan bahwa wilayah ini menjadi prioritas utama dalam pemerataan kapasitas pendidikan."
+    ]
+
+    # 3. Pemasangan dinamis ke nomor Klaster asli
+    for idx in range(len(profile)):
+        c_id = profile.loc[idx, 'Klaster']
+        if idx < 4:
+            dynamic_names[c_id] = f"{labels[idx]}"
+            dynamic_descriptions[c_id] = desc[idx]
+            dynamic_colors[c_id] = colors[idx]
+            
+            # Ranking Kapasitas (1 = Sangat Memadai s/d 4 = Sangat Kritis)
+            dynamic_ranks[c_id] = idx + 1               
+            
+            # Prioritas Intervensi (4 = Aman s/d 1 = Prioritas Utama/Sangat Kritis)
+            dynamic_priorities[c_id] = 4 - idx
+
+    return dynamic_names, dynamic_descriptions, dynamic_colors, dynamic_ranks, dynamic_priorities
+
+
 def process_dapodik_data(df, geojson_names=None):
     if "Nama Sekolah" in df.columns:
         df = df[~df["Nama Sekolah"].astype(str).str.lower().str.contains("total", na=False)]
@@ -504,13 +566,12 @@ def process_dapodik_data(df, geojson_names=None):
     kmeans = KMeans(n_clusters=4, init="k-means++", random_state=42, n_init=10)
     df_agg["Klaster"] = kmeans.fit_predict(X_scaled)
 
-    klaster_label = {
-        0: "Klaster 0 (Sangat Kritis)",
-        1: "Klaster 1 (Kurang Memadai)",
-        2: "Klaster 2 (Memadai / Aman)",
-        3: "Klaster 3 (Sangat Berlebih)",
-    }
-    df_agg["Nama_Klaster"] = df_agg["Klaster"].map(klaster_label)
+    dynamic_names, dynamic_descriptions, dynamic_colors, dynamic_ranks, dynamic_priorities = assign_dynamic_labels(df_agg)
+    df_agg["Nama_Klaster"] = df_agg["Klaster"].map(dynamic_names)
+    df_agg["Deskripsi_Klaster"] = df_agg["Klaster"].map(dynamic_descriptions)
+    df_agg["Cluster_Color"] = df_agg["Klaster"].map(dynamic_colors)
+    df_agg["Ranking"] = df_agg["Klaster"].map(dynamic_ranks)
+    df_agg["Prioritas_Intervensi"] = df_agg["Klaster"].map(dynamic_priorities)
     
     # PERHITUNGAN RATA-RATA UNTUK PROFIL
     df_agg["Rata_Rata_Sekolah_Per_Kec"] = df_agg.groupby("Klaster")["Jumlah_Sekolah"].transform("mean")
@@ -553,12 +614,6 @@ def normalize_name(text):
 
 def prepare_map_geojson(geojson_data, df_agg, geojson_name_field):
     geojson_map = deepcopy(geojson_data)
-    cluster_colors = {
-        0: "#d7191c", # Merah Tua (Sangat Kritis)
-        1: "#fdae61", # Oranye Terang (Kurang Memadai)
-        2: "#abd9e9", # Biru Muda (Memadai)
-        3: "#2c7bb6"  # Biru Tua (Sangat Berlebih)
-    }
 
     lookup = df_agg.set_index("Kec_Mapping").to_dict(orient="index")
 
@@ -573,7 +628,7 @@ def prepare_map_geojson(geojson_data, df_agg, geojson_name_field):
             row_copy = row.copy()
             if "Klaster" in row_copy:
                 row_copy["Klaster"] = int(row_copy["Klaster"]) if pd.notna(row_copy["Klaster"]) else None
-            row_copy["cluster_color"] = cluster_colors.get(row_copy.get("Klaster"), "#cccccc")
+            row_copy["cluster_color"] = row_copy.get("Cluster_Color", "#cccccc")
             row_copy["match_mode"] = "normalisasi_nama"
             props.update(row_copy)
         else:
@@ -581,6 +636,7 @@ def prepare_map_geojson(geojson_data, df_agg, geojson_name_field):
             props["Rasio_PD_Sekolah"] = props["Rasio_PD_Guru"] = None
             props["Klaster"] = None
             props["Nama_Klaster"] = "Data tidak tersedia"
+            props["Deskripsi_Klaster"] = ""
             props["Rata_Rata_Sekolah_Per_Kec"] = props["Rata_Rata_PD_Per_Kec"] = None
             props["Rata_Rata_Guru_Per_Kec"] = None
             props["match_mode"] = "tidak cocok"
@@ -630,7 +686,24 @@ def build_map_html(geojson_data, df_agg, geojson_name_field):
         popup=popup,
     ).add_to(m)
 
-    legend_html = """
+    legend_profile = df_agg.groupby("Klaster").agg(
+        Avg_Rasio_Sekolah=("Rasio_PD_Sekolah", "mean"),
+        Avg_Rasio_Guru=("Rasio_PD_Guru", "mean"),
+        Nama_Klaster=("Nama_Klaster", "first"),
+        Cluster_Color=("Cluster_Color", "first"),
+    ).reset_index().sort_values(
+        by=["Avg_Rasio_Sekolah", "Avg_Rasio_Guru"],
+        ascending=[True, True],
+    )
+
+    legend_items = "".join(
+        [
+            f"<div><span style='display:inline-block;width:12px;height:12px;background:{row['Cluster_Color']};margin-right:8px;border-radius:3px'></span>{row['Nama_Klaster']}</div>"
+            for _, row in legend_profile.iterrows()
+        ]
+    )
+
+    legend_html = f"""
     <div style="
         position: fixed;
         bottom: 35px;
@@ -645,10 +718,7 @@ def build_map_html(geojson_data, df_agg, geojson_name_field):
         min-width: 210px;
     ">
         <div style="font-weight: 700; margin-bottom: 8px;">Legenda Klaster</div>
-        <div><span style="display:inline-block;width:12px;height:12px;background:#d7191c;margin-right:8px;border-radius:3px"></span>Sangat Kritis</div>
-        <div><span style="display:inline-block;width:12px;height:12px;background:#fdae61;margin-right:8px;border-radius:3px"></span>Kurang Memadai</div>
-        <div><span style="display:inline-block;width:12px;height:12px;background:#abd9e9;margin-right:8px;border-radius:3px"></span>Memadai / Aman</div>
-        <div><span style="display:inline-block;width:12px;height:12px;background:#2c7bb6;margin-right:8px;border-radius:3px"></span>Sangat Berlebih</div>
+        {legend_items}
     </div>
     """
     m.get_root().html.add_child(folium.Element(legend_html))
@@ -703,10 +773,10 @@ if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
                     st.session_state["extraction_done"] = False
                     st.session_state["extraction_summary"] = None
 
-                    st.success(f"✅ {len(uploaded_files)} file berhasil disimpan. Data lama sudah diganti.")
+                    st.success(f"{len(uploaded_files)} file berhasil disimpan. Data lama sudah diganti.")
                     st.info("File tersimpan. Klik tombol ekstraksi untuk membuat data bersih SD & SMP negeri.")
                 except Exception as e:
-                    st.error(f"⚠️ Terjadi kesalahan saat menyimpan file: {e}")
+                    st.error(f"Terjadi kesalahan saat menyimpan file: {e}")
 
     with col_right:
         uploaded_geojson = st.file_uploader(
@@ -718,11 +788,11 @@ if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
             if st.button("Gunakan / simpan GeoJSON yang diupload"):
                 try:
                     geojson_obj = update_geojson_from_upload(uploaded_geojson)
-                    st.success(f"✅ GeoJSON berhasil diperbarui dari {uploaded_geojson.name}")
+                    st.success(f"GeoJSON berhasil diperbarui dari {uploaded_geojson.name}")
                     st.caption(f"Aktif: {uploaded_geojson.name}")
                     st.session_state["geojson_data"] = geojson_obj
                 except Exception as e:
-                    st.error(f"⚠️ GeoJSON gagal diperbarui: {e}")
+                    st.error(f"GeoJSON gagal diperbarui: {e}")
 
     st.info("Upload satu atau beberapa file Dapodik sekaligus. Hasilnya akan digabung lalu disiapkan untuk ekstraksi dan proses klaster.")
 
@@ -779,7 +849,7 @@ if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
 
                 csv_bersih = cleaned_export_df.to_csv(index=False).encode("utf-8")
                 st.download_button(
-                    label="⬇️ Unduh Data Bersih SD & SMP Negeri (CSV)",
+                    label="⬇Unduh Data Bersih SD & SMP Negeri (CSV)",
                     data=csv_bersih,
                     file_name="Data_SD_SMP_Negeri_Medan_Clean.csv",
                     mime="text/csv",
@@ -802,23 +872,18 @@ if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
                     processed_df = process_dapodik_data(source_df, geojson_names=geojson_names)
                     st.session_state["processed_df"] = processed_df
 
-                st.success("✅ Data berhasil diproses.")
+                st.success("Data berhasil diproses.")
                 
                 # Tampilkan tabel ringkasan klaster (profil rata-rata)
-                st.subheader("📈 Profil Rata-rata Indikator per Klaster")
+                st.subheader("Profil Rata-rata Indikator per Klaster")
                 cluster_profile = profile_clusters(processed_df)
-                cluster_names_dict = {
-                    0: "Sangat Kritis",
-                    1: "Kurang Memadai",
-                    2: "Memadai / Aman",
-                    3: "Sangat Berlebih",
-                }
+                cluster_names_dict = processed_df.groupby("Klaster")["Nama_Klaster"].first().to_dict()
                 cluster_profile["Nama_Klaster"] = cluster_profile["Klaster"].map(cluster_names_dict)
                 display_profile = cluster_profile[["Klaster", "Nama_Klaster", "Jumlah_Kecamatan", "Rata_Rata_Sekolah", "Rata_Rata_PD", "Rata_Rata_Guru", "Rata_Rasio_PD_Sekolah", "Rata_Rasio_PD_Guru"]].copy()
                 display_profile.columns = ["Klaster", "Nama Klaster", "Jml Kecamatan", "Rata2 Sekolah", "Rata2 PD", "Rata2 Guru", "Rata2 Rasio PD/Sekolah", "Rata2 Rasio PD/Guru"]
                 st.dataframe(display_profile, use_container_width=True, hide_index=True)
                 
-                st.subheader("📊 Hasil Klasterisasi per Kecamatan")
+                st.subheader("Hasil Klasterisasi per Kecamatan")
                 st.dataframe(
                     processed_df[["Kecamatan", "Jumlah_Sekolah", "Jumlah_PD", "Jumlah_Guru", "Rasio_PD_Sekolah", "Rasio_PD_Guru", "Nama_Klaster"]],
                     use_container_width=True,
@@ -833,10 +898,10 @@ if nav_choice == "Ekstrak data sekolah SD dan SMP negeri":
                     mime="text/csv",
                 )
             except Exception as e:
-                st.error(f"⚠️ Terjadi kesalahan saat memproses file: {e}")
+                st.error(f"Terjadi kesalahan saat memproses file: {e}")
 
         if st.session_state["processed_df"] is None:
-            st.info("👈 Upload lalu simpan file Dapodik terlebih dahulu. Jika ingin data bersih, tekan tombol ekstraksi sebelum proses klaster.")
+            st.info("Upload lalu simpan file Dapodik terlebih dahulu. Jika ingin data bersih, tekan tombol ekstraksi sebelum proses klaster.")
 elif nav_choice == "Menampilkan WebGIS":
     st.subheader("Dashboard WebGIS")
     st.caption("Peta ini selaras dengan hasil K-Means++ dan disusun agar tampil seperti dashboard analitis.")
@@ -918,18 +983,8 @@ elif nav_choice == "Menampilkan WebGIS":
             with right:
                 st.subheader("Profil Klaster (Rata-rata Indikator)")
                 cluster_profile = profile_clusters(processed_df)
-                cluster_names = {
-                    0: "Sangat Kritis",
-                    1: "Kurang Memadai",
-                    2: "Memadai / Aman",
-                    3: "Sangat Berlebih",
-                }
-                cluster_meanings = {
-                    0: "Kapasitas pendidikan sangat terbatas, rasio peserta didik tinggi, prioritas utama pemerataan.",
-                    1: "Kapasitas pendidikan belum optimal sehingga masih memerlukan peningkatan.",
-                    2: "Kapasitas pendidikan relatif seimbang dengan kebutuhan peserta didik.",
-                    3: "Kapasitas pendidikan relatif tinggi dan mampu melayani peserta didik dengan baik.",
-                }
+                cluster_names = processed_df.groupby("Klaster")["Nama_Klaster"].first().to_dict()
+                cluster_meanings = processed_df.groupby("Klaster")["Deskripsi_Klaster"].first().to_dict()
                 
                 for _, row in cluster_profile.iterrows():
                     klaster = int(row["Klaster"])
@@ -944,7 +999,7 @@ elif nav_choice == "Menampilkan WebGIS":
 
                     with st.container():
                         st.markdown(
-                            f"<div style='margin-bottom:0.35rem;'><strong>Klaster {klaster} - {label}</strong></div>"
+                            f"<div style='margin-bottom:0.35rem;'><strong>{label}</strong></div>"
                             f"<div style='font-size:0.88rem; line-height:1.35; margin-bottom:0.45rem; color:rgba(255,255,255,0.78);'>{meaning}</div>",
                             unsafe_allow_html=True,
                         )
@@ -955,7 +1010,7 @@ elif nav_choice == "Menampilkan WebGIS":
 
             st.caption(f"GeoJSON field yang dipakai sebagai pengikat wilayah: {geojson_name_field}")
         except Exception as e:
-            st.error(f"⚠️ Terjadi kesalahan saat merender peta: {e}")
+            st.error(f"Terjadi kesalahan saat merender peta: {e}")
 elif nav_choice == "Evaluasi Model":
     st.subheader("Evaluasi Model K-Means++")
     st.caption("Halaman ini menunjukkan bukti numerik untuk pemilihan jumlah klaster, terutama Elbow Method dan Silhouette Score.")
@@ -997,4 +1052,4 @@ elif nav_choice == "Evaluasi Model":
 
             st.caption("Elbow dipakai untuk melihat titik penurunan inertia yang mulai melandai, sedangkan silhouette score menunjukkan kualitas pemisahan antar klaster.")
         except Exception as e:
-            st.error(f"⚠️ Evaluasi model gagal dijalankan: {e}")
+            st.error(f"Evaluasi model gagal dijalankan: {e}")
