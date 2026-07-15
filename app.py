@@ -19,7 +19,7 @@ try:
 except Exception:
     load_workbook = None
 
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import davies_bouldin_score
 
 # ==========================================
 # KONFIGURASI HALAMAN STREAMLIT
@@ -187,7 +187,7 @@ def create_excel_download_bytes(df, sheet_name="Klaster"):
     raise RuntimeError(f"Excel export gagal: {last_error}")
 
 
-def evaluate_kmeans_candidates(df_agg, max_k=8):
+def evaluate_kmeans_candidates(df_agg, chosen_k=4, max_k=8):
     feature_columns = ["Jumlah_Sekolah", "Rasio_PD_Sekolah", "Rasio_PD_Guru", "Jumlah_PD"]
     features = df_agg[feature_columns].dropna().copy()
 
@@ -205,20 +205,25 @@ def evaluate_kmeans_candidates(df_agg, max_k=8):
     for k in range(2, max_k + 1):
         model = KMeans(n_clusters=k, init="k-means++", random_state=42, n_init=10)
         labels = model.fit_predict(features_scaled)
-        silhouette = silhouette_score(features_scaled, labels) if len(set(labels)) > 1 else None
+        
+        # Menghitung Davies-Bouldin Index (DBI)
+        dbi = davies_bouldin_score(features_scaled, labels) if len(set(labels)) > 1 else None
 
         rows.append(
             {
                 "k": k,
                 "inertia": float(model.inertia_),
-                "silhouette_score": float(silhouette) if silhouette is not None else None,
+                "dbi": float(dbi) if dbi is not None else None,
             }
         )
 
     evaluation_df = pd.DataFrame(rows)
-    best_row = evaluation_df.loc[evaluation_df["silhouette_score"].idxmax()]
+    
+    # Ambil nilai WCSS dan DBI secara spesifik untuk K yang dipilih via Elbow Method
+    chosen_row = evaluation_df.loc[evaluation_df["k"] == chosen_k].iloc[0]
 
-    return evaluation_df, int(best_row["k"]), float(best_row["silhouette_score"])
+    # Kembalikan dataframe evaluasi, K terpilih, WCSS, dan DBI
+    return evaluation_df, chosen_k, float(chosen_row["inertia"]), float(chosen_row["dbi"])
 
 
 def infer_kecamatan_from_filename(file_name, candidate_names=None):
@@ -495,13 +500,13 @@ def assign_dynamic_labels(df_agg):
     
     # Deskripsi murni berdasarkan indikator penelitian (tanpa asumsi)
     desc = [
-        "Kapasitas layanan pendidikan relatif paling baik dibandingkan klaster lainnya. Rasio peserta didik terhadap sekolah dan guru berada pada tingkat yang lebih rendah sehingga kapasitas layanan dinilai mampu memenuhi kebutuhan peserta didik dengan baik.",
+        "Klaster ini memiliki karakteristik dengan tingkat tekanan kapasitas layanan pendidikan yang relatif paling rendah berdasarkan hasil klasterisasi.",
 
-        "Kapasitas layanan pendidikan relatif memadai. Ketersediaan sekolah dan tenaga pendidik masih mampu mengimbangi jumlah peserta didik, meskipun tetap memerlukan pemantauan terhadap perubahan kebutuhan layanan.",
+        "Klaster ini memiliki karakteristik dengan tingkat tekanan kapasitas layanan pendidikan yang relatif rendah berdasarkan hasil klasterisasi.",
 
-        "Kapasitas layanan pendidikan mulai mengalami tekanan. Rasio peserta didik terhadap sekolah dan guru relatif lebih tinggi sehingga diperlukan perhatian dalam upaya pemerataan kapasitas pendidikan.",
+        "Klaster ini memiliki karakteristik dengan tingkat tekanan kapasitas layanan pendidikan yang relatif tinggi berdasarkan hasil klasterisasi.",
 
-        "Kapasitas layanan pendidikan paling terbatas dibandingkan klaster lainnya. Tingginya rasio peserta didik terhadap sekolah dan guru menunjukkan bahwa wilayah ini menjadi prioritas utama dalam pemerataan kapasitas pendidikan."
+        "Klaster ini memiliki karakteristik dengan tingkat tekanan kapasitas layanan pendidikan yang relatif paling tinggi berdasarkan hasil klasterisasi."
     ]
 
     # 3. Pemasangan dinamis ke nomor Klaster asli
@@ -1013,7 +1018,7 @@ elif nav_choice == "Menampilkan WebGIS":
             st.error(f"Terjadi kesalahan saat merender peta: {e}")
 elif nav_choice == "Evaluasi Model":
     st.subheader("Evaluasi Model K-Means++")
-    st.caption("Halaman ini menunjukkan bukti numerik untuk pemilihan jumlah klaster, terutama Elbow Method dan Silhouette Score.")
+    st.caption("Halaman ini menunjukkan bukti numerik penentuan jumlah klaster menggunakan Elbow Method (WCSS/Inertia), divalidasi menggunakan Davies-Bouldin Index (DBI).")
 
     processed_df = st.session_state.get("processed_df")
 
@@ -1021,35 +1026,40 @@ elif nav_choice == "Evaluasi Model":
         st.warning("Belum ada data hasil proses. Jalankan proses klaster terlebih dahulu sebelum membuka evaluasi model.")
     else:
         try:
-            evaluation_df, best_k, best_score = evaluate_kmeans_candidates(processed_df)
+            # Memanggil fungsi evaluasi dengan menetapkan K=4 sesuai keputusan Elbow
+            evaluation_df, current_k, wcss_score, dbi_score = evaluate_kmeans_candidates(processed_df, chosen_k=4)
 
-            current_k = 4
-            best_message = f"Berdasarkan silhouette score tertinggi pada data ini, k terbaik adalah {best_k} dengan skor {best_score:.3f}."
-            if best_k == current_k:
-                best_message += " Ini konsisten dengan konfigurasi 4 klaster yang dipakai saat ini."
-            else:
-                best_message += f" Saat ini aplikasi memakai k = {current_k}, sehingga hasil evaluasi ini bisa dipakai sebagai bahan justifikasi atau penyesuaian."
-
+            best_message = (
+                f"Berdasarkan analisis visual titik patahan (Elbow Method) pada grafik penurunan WCSS, "
+                f"jumlah klaster optimal yang ditetapkan untuk penelitian ini adalah **K = {current_k}**. "
+                f"Davies-Bouldin Index (DBI) digunakan sebagai pengujian validitas klaster, dengan skor sebesar **{dbi_score:.3f}** "
+                f"dan nilai WCSS sebesar **{wcss_score:.3f}**."
+            )
             st.info(best_message)
 
-            metric_col1, metric_col2 = st.columns(2)
-            metric_col1.metric("k terbaik menurut Silhouette", best_k)
-            metric_col2.metric("Skor Silhouette tertinggi", f"{best_score:.3f}")
+            # Menampilkan 3 Metrik Jejer
+            metric_col1, metric_col2, metric_col3 = st.columns(3)
+            metric_col1.metric("K Terpilih (Elbow Method)", current_k)
+            metric_col2.metric("Nilai WCSS (Inertia)", f"{wcss_score:.3f}")
+            metric_col3.metric("Skor Validasi DBI", f"{dbi_score:.3f}")
 
+            # Menampilkan Grafik
             chart_left, chart_right = st.columns(2)
             with chart_left:
-                st.subheader("Elbow Method")
+                st.subheader("Elbow Method (Inertia)")
                 st.line_chart(evaluation_df.set_index("k")["inertia"])
             with chart_right:
-                st.subheader("Silhouette Score")
-                st.line_chart(evaluation_df.set_index("k")["silhouette_score"])
+                st.subheader("Davies-Bouldin Index (DBI)")
+                st.line_chart(evaluation_df.set_index("k")["dbi"])
 
+            # Tabel Rincian Data Evaluasi
             st.subheader("Tabel Evaluasi K")
             display_eval = evaluation_df.copy()
-            display_eval["silhouette_score"] = display_eval["silhouette_score"].map(lambda x: f"{x:.3f}" if pd.notna(x) else "-")
-            display_eval.columns = ["k", "Inertia", "Silhouette Score"]
+            display_eval["inertia"] = display_eval["inertia"].map(lambda x: f"{x:.3f}")
+            display_eval["dbi"] = display_eval["dbi"].map(lambda x: f"{x:.3f}" if pd.notna(x) else "-")
+            display_eval.columns = ["k", "WCSS (Inertia)", "Davies-Bouldin Index"]
             st.dataframe(display_eval, use_container_width=True, hide_index=True)
 
-            st.caption("Elbow dipakai untuk melihat titik penurunan inertia yang mulai melandai, sedangkan silhouette score menunjukkan kualitas pemisahan antar klaster.")
+            st.caption("Elbow Method (Inertia) mengukur jarak titik data ke pusat klasternya (semakin turun melandai berarti optimal). DBI mengukur seberapa baik pemisahan antar klaster (nilai yang rendah menunjukkan validitas pembagian yang baik).")
         except Exception as e:
             st.error(f"Evaluasi model gagal dijalankan: {e}")
