@@ -1,0 +1,3 @@
+- streamlit run 'app.py'
+- insert data dapodik
+- voilaa~ information came up
